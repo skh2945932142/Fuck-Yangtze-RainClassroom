@@ -1,4 +1,5 @@
 import queue
+import random
 import threading
 
 import requests
@@ -388,6 +389,25 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url):
     print(question_type[problem_type], problem_content, options, img_url)
 
     raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)
+
+    # LLM could not determine the answer (returned empty list): submitting a
+    # blank is worse than not submitting — it records an instant blank answer
+    # (anomalous behavior signal) and forfeits any partial credit. For choice
+    # questions guess a random option (25%+ beats 0%); for text answers skip.
+    if not raw_answer or all(not str(item).strip() for item in raw_answer):
+        if problem_type in (1, 2, 3) and isinstance(options, list) and options:
+            keys = [str(o.get("key") if isinstance(o, dict) else o) for o in options]
+            keys = [k for k in keys if k] or [chr(65 + i) for i in range(len(options))]
+            if problem_type == 2:
+                guess = random.sample(keys, k=max(1, len(keys) // 2))
+            else:
+                guess = [random.choice(keys)]
+            print(f"答案为空，选择题随机作答: {guess}", flush=True)
+            raw_answer = guess
+        else:
+            print("答案为空且非选择题，放弃本次作答", flush=True)
+            return False
+
     post_json = {
         "problemId": problem_id,
         "problemType": problem_type,

@@ -65,12 +65,32 @@ def get_ans(text):
     return completion.choices[0].message.content
 
 
+def _option_text(option):
+    """Extract the answer text of a choice option. Only `value` counts:
+    `key` is the always-present option letter (A/B/C/D), so falling back to
+    it would make blank-option detection impossible."""
+    if isinstance(option, dict):
+        return str(option.get("value") or "")
+    return str(getattr(option, "value", None) or "")
+
+
 def request_ai(type, problem, options, img_url):
     problem_text = problem
-    if problem == "":
-        print("题目文本为空 启用OCR图片识别")
-        problem_text = ocr_form_url_image(img_url)
-        print("OCR识别结果", problem_text)
+    # OCR when the question references an image (image-only questions, or
+    # choice questions whose option text lives in the slide image).
+    options_all_blank = (isinstance(options, list) and bool(options)
+                         and all(not _option_text(o).strip() for o in options))
+    needs_image = problem == "" or options_all_blank or "如图" in str(problem)
+    if img_url and needs_image:
+        print("题目依赖图片 启用OCR识别", flush=True)
+        ocr_text = ocr_form_url_image(img_url)
+        if ocr_text:
+            print("OCR识别结果", ocr_text, flush=True)
+            # OCR text supplements the original body; image-only questions
+            # may have no body at all.
+            problem_text = f"{problem}\n{ocr_text}".strip() if problem else ocr_text
+        else:
+            print("OCR未识别到文字", flush=True)
 
     LLM_init(ai_key)
     send = {
