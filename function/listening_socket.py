@@ -124,6 +124,9 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
             else:
                 return
             # 开始获取PPT
+            # copy() is required: the global headers dict is shared by all
+            # lesson threads, in-place mutation would leak this lesson's JWT
+            # into every other concurrent request.
             new_headers = headers.copy()
             new_headers["Authorization"] = "Bearer " + ppt_jwt
             new_headers["User-Agent"] = (
@@ -344,7 +347,9 @@ def answer(problem_id, problem_type, jwt, problem_content, options,img_url):
         "result": request_ai(type=question_type[problem_type], problem=problem_content, options=options,img_url=img_url)
     }
 
-    new_headers = headers
+    # Same copy() rationale as above: mutating the global headers in place
+    # would corrupt requests from other lesson threads.
+    new_headers = headers.copy()
     new_headers["Authorization"] = "Bearer " + jwt
     new_headers["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
                                  "Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0")

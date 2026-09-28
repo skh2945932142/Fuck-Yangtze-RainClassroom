@@ -1,10 +1,18 @@
-from paddleocr import PaddleOCR
 import cv2
 import numpy as np
 import requests
 
-# 全局只初始化一次，避免重复加载
-ocr = PaddleOCR(use_angle_cls=False, lang="ch")
+# Lazy init: importing PaddleOCR at module load takes ~1GB RAM and several
+# seconds, which is unacceptable in a long-running loop that rarely needs OCR.
+ocr = None
+
+
+def _get_ocr():
+    global ocr
+    if ocr is None:
+        from paddleocr import PaddleOCR
+        ocr = PaddleOCR(use_angle_cls=False, lang="ch")
+    return ocr
 
 def ocr_form_url_image(url: str):
     """识别网络图片"""
@@ -13,7 +21,7 @@ def ocr_form_url_image(url: str):
         response.raise_for_status()
         image_array = np.asarray(bytearray(response.content), dtype=np.uint8)
         img = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-        return get_ocr_result(ocr.ocr(img))
+        return get_ocr_result(_get_ocr().ocr(img))
     except Exception as e:
         print(f"下载或识别失败: {e}")
         return None

@@ -1,4 +1,5 @@
 import json
+import os
 
 from openai import OpenAI
 from config import ai_key
@@ -7,6 +8,13 @@ from util.ocr import ocr_form_url_image
 
 ### 摘抄自一个学弟的第二课堂仓库AI部分
 ## https://github.com/tinyvan/SecondClass
+
+# Any OpenAI-compatible endpoint works: set AI_BASE_URL / AI_MODEL / AI_KEY.
+# Defaults keep the original ChatAnywhere behavior when env vars are absent.
+ai_base_url = os.getenv("AI_BASE_URL", "https://api.chatanywhere.tech/v1")
+ai_model = os.getenv("AI_MODEL", "gpt-4o-mini")
+# Optional: disable the enncy question-bank lookup (empty key = skip).
+enncy_enabled = bool(os.getenv("ENNCY_KEY", ""))
 
 system_prompt = """
 我将为你发送类似如下格式的文本，question为使用OCR工具对图片题目识别的结果，你需要根据语义拼接，有的时候ABCD字符会缺失或者在选项后面，具体根据顺序和语义；
@@ -31,17 +39,19 @@ client = None
 
 def LLM_init(api_key: str):
     global client
-    client = OpenAI(
-        api_key=api_key,
-        base_url="https://api.chatanywhere.tech/v1",
-    )
+    if client is None:
+        client = OpenAI(
+            api_key=api_key,
+            base_url=ai_base_url,
+        )
+    return client
 
 
 def get_ans(text):
     if client is None:
         raise Exception("LLM is not initialized")
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model=ai_model,
         response_format={"type": "json_object"},
         messages=[
             {'role': 'system', 'content': system_prompt},
@@ -64,10 +74,12 @@ def request_ai(type, problem, options, img_url):
         "options": options
     }
 
-    enncy_result = search(problem_text)
-    print("搜题结果", enncy_result)
-    send["searched"] = enncy_result
+    if enncy_enabled:
+        enncy_result = search(problem_text)
+        print("搜题结果", enncy_result)
+        send["searched"] = enncy_result
 
     response = get_ans(str(send))
     print(response)
-    return json.loads(response)["answer"]
+    answer = json.loads(response).get("answer", [])
+    return answer if isinstance(answer, list) else [answer]

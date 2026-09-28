@@ -66,17 +66,18 @@ def get_listening_classes_and_sign(filtered_courses: list):
                         if course_name in filtered_courses:
                             queue_on_listening_task()
 
-                    # 将签到信息写入文件顶部
-                    new_log = {
-                        "id": lesson_id,
-                        "title": course_name,
-                        "name": course_name,
-                        "time": get_now(),
-                        "student": name,
-                        "status": status,
-                        "url": "https://changjiang.yuketang.cn/m/v2/lesson/student/" + str(lesson_id)
-                    }
-                    write_log(log_file_name, new_log)
+                    # 每节课只写一次签到日志，扫描循环重启后不重复追加
+                    if not has_in_checked(lesson_id):
+                        new_log = {
+                            "id": lesson_id,
+                            "title": course_name,
+                            "name": course_name,
+                            "time": get_now(),
+                            "student": name,
+                            "status": status,
+                            "url": "https://changjiang.yuketang.cn/m/v2/lesson/student/" + str(lesson_id)
+                        }
+                        write_log(log_file_name, new_log)
                 else:
                     print("失败", response_sign.status_code, response_sign.text)
             # 所有签到完成后，进行死循环巡查，检查是否出现答题
