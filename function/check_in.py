@@ -10,17 +10,45 @@ from util.notice import email_notice
 from util.timestamp import get_now
 
 
+# 连续失效计数：雨课堂服务端偶发认证抖动（瞬时 UNAUTHENTICATED 后自愈），
+# 连续 N 轮失效才认定真过期并发邮件，避免抖动误报
+_session_failure_count = 0
+SESSION_FAILURE_NOTICE_THRESHOLD = 3
+_notice_sent = False
+
+
 # 获取正在进行的
 def get_listening():
+    global _session_failure_count, _notice_sent
     response = requests.get(host + api["get_listening"], headers=headers)
     if response.status_code == 200:
         response_data = response.json()
         # Logged-out sessions get HTTP 200 with an UNAUTHENTICATED body
         # instead of a 401, so detect it by payload.
         if response_data.get("code") == 50000 or response_data.get("msg") == "UNAUTHENTICATED":
-            print("SESSION 已失效", flush=True)
-            try_relogin()
+            _session_failure_count += 1
+            print(f"SESSION 失效（连续第 {_session_failure_count} 轮）", flush=True)
+            relogin_ok = try_relogin()
+            # 重登成功即视为恢复；重登没配置/失败时连续 N 轮后邮件提醒一次
+            if relogin_ok:
+                _session_failure_count = 0
+                _notice_sent = False
+            elif (_session_failure_count >= SESSION_FAILURE_NOTICE_THRESHOLD
+                  and not _notice_sent):
+                email_notice(
+                    subject="雨课堂 SESSION 失效，请更新",
+                    content=(
+                        "雨课堂监听服务的 SESSION 已连续 "
+                        f"{_session_failure_count} 轮失效，自动重登未成功。\n\n"
+                        "请重新登录 changjiang.yuketang.cn 获取新的 sessionid，"
+                        "更新到 Zeabur 服务的 SESSION 环境变量并重启服务。\n\n"
+                        "（此提醒只发一次，恢复后计数重置）"
+                    ),
+                )
+                _notice_sent = True
             return None
+        _session_failure_count = 0
+        _notice_sent = False
         return response_data["data"]
     else:
         return None

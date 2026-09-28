@@ -58,6 +58,14 @@ ykt_name = os.getenv("YKT_NAME", "")
 ykt_password = os.getenv("YKT_PASSWORD", "")
 ykt_login_type = os.getenv("YKT_LOGIN_TYPE", "phone")
 
+# Email notice (SMTP): QQ mail users -> host smtp.qq.com, port 465, pass =
+# authorization code (授权码), NOT the account password.
+email_user = os.getenv("EMAIL_USER", "")
+email_pass = os.getenv("EMAIL_PASS", "")
+to_email = os.getenv("TO_EMAIL", "")
+email_host = os.getenv("EMAIL_HOST", "smtp.qq.com")
+email_port = int(os.getenv("EMAIL_PORT", "465"))
+
 # Mutable cookie header: relogin rewrites it in place so every module holding
 # a reference to config.headers picks up the new sessionid without reload.
 headers = {
