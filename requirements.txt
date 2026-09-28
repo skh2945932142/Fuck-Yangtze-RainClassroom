@@ -5,3 +5,4 @@ requests
 paddleocr
 paddlepaddle
 websocket-client
+pycryptodome

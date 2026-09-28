@@ -1,8 +1,10 @@
 import requests
 
 from function.listening_socket import start_all_sockets
+from function.login import login
 from function.user import get_user_name
-from config import host, api, headers, log_file_name,check_in_sources
+from config import host, api, headers, log_file_name, check_in_sources, \
+    ykt_name, ykt_password, ykt_login_type, set_session_id
 from util.file import write_log, read_log
 from util.notice import email_notice
 from util.timestamp import get_now
@@ -13,9 +15,30 @@ def get_listening():
     response = requests.get(host + api["get_listening"], headers=headers)
     if response.status_code == 200:
         response_data = response.json()
+        # Logged-out sessions get HTTP 200 with an UNAUTHENTICATED body
+        # instead of a 401, so detect it by payload.
+        if response_data.get("code") == 50000 or response_data.get("msg") == "UNAUTHENTICATED":
+            print("SESSION 已失效", flush=True)
+            try_relogin()
+            return None
         return response_data["data"]
     else:
         return None
+
+
+# 密码重登：失败（验证码门槛/凭据错误）时仅提示，等下一轮扫描用新 SESSION
+def try_relogin():
+    if not (ykt_name and ykt_password):
+        print("未配置 YKT_NAME/YKT_PASSWORD，无法自动重登，请手动更新 SESSION", flush=True)
+        return False
+    try:
+        new_session = login(ykt_name, ykt_password, ykt_login_type)
+    except RuntimeError as error:
+        print(f"自动重登失败: {error}", flush=True)
+        return False
+    set_session_id(new_session)
+    print("自动重登成功，已更新 SESSION", flush=True)
+    return True
 
 
 # 获取正在进行的课堂并且签到、写日志 新的签到方法

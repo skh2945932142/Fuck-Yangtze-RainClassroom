@@ -52,9 +52,22 @@ sessionId = _read_ini_field(0) if isLocal else os.environ["SESSION"]
 ai_key = _read_ini_field(1) if isLocal else os.getenv("AI_KEY", "")
 enncy_key = _read_ini_field(2) if isLocal else os.getenv("ENNCY_KEY", "")
 
+# Password auto-relogin: YKT_NAME + YKT_PASSWORD (and optional YKT_LOGIN_TYPE,
+# "phone" or "email"). Empty = feature off, SESSION must be refreshed manually.
+ykt_name = os.getenv("YKT_NAME", "")
+ykt_password = os.getenv("YKT_PASSWORD", "")
+ykt_login_type = os.getenv("YKT_LOGIN_TYPE", "phone")
+
+# Mutable cookie header: relogin rewrites it in place so every module holding
+# a reference to config.headers picks up the new sessionid without reload.
 headers = {
     "Cookie": "sessionid=" + sessionId
 }
+
+
+def set_session_id(new_session_id: str):
+    """Swap the sessionid after a successful relogin (in-place update)."""
+    headers["Cookie"] = "sessionid=" + new_session_id
 
 question_type = {
     1: "单选题",
