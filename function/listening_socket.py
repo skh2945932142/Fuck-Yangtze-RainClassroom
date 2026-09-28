@@ -337,14 +337,34 @@ def start_all_sockets(on_lesson_list):
 
 
 # 答题
-def answer(problem_id, problem_type, jwt, problem_content, options,img_url):
-    print(question_type[problem_type], problem_content, options,img_url)
+def format_result(problem_type, answer):
+    """Shape the LLM answer array into the payload the v3 answer API expects.
 
+    Cross-checked against a maintained reference implementation
+    (infstellar/RainClassroomAssistant): choice/vote questions take a plain
+    list, fill-blank takes {"0": "...", "1": "..."} keyed by blank index,
+    subjective takes {"content": "...", "pics": []}.
+    """
+    if problem_type == 4 and isinstance(answer, list):
+        return {str(index): value for index, value in enumerate(answer)}
+    if problem_type == 5:
+        if isinstance(answer, list):
+            content = "\n".join(str(value).strip('"') for value in answer)
+        else:
+            content = str(answer).strip('"')
+        return {"content": content, "pics": [{"pic": "", "thumb": ""}]}
+    return answer
+
+
+def answer(problem_id, problem_type, jwt, problem_content, options, img_url):
+    print(question_type[problem_type], problem_content, options, img_url)
+
+    raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)
     post_json = {
         "problemId": problem_id,
         "problemType": problem_type,
         "dt": get_date_time(),
-        "result": request_ai(type=question_type[problem_type], problem=problem_content, options=options,img_url=img_url)
+        "result": format_result(problem_type, raw_answer)
     }
 
     # Same copy() rationale as above: mutating the global headers in place

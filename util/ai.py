@@ -13,6 +13,8 @@ from util.ocr import ocr_form_url_image
 # Defaults keep the original ChatAnywhere behavior when env vars are absent.
 ai_base_url = os.getenv("AI_BASE_URL", "https://api.chatanywhere.tech/v1")
 ai_model = os.getenv("AI_MODEL", "gpt-4o-mini")
+# Hard character cap per blank/answer for subjective & fill-blank questions.
+SUBJECTIVE_MAX_CHARS = int(os.getenv("SUBJECTIVE_MAX_CHARS", "50"))
 # Optional: disable the enncy question-bank lookup (empty key = skip).
 enncy_enabled = bool(os.getenv("ENNCY_KEY", ""))
 
@@ -32,6 +34,7 @@ options提供选项（如果选项为空，请从question中寻找，如果quest
 "answer":["A"]
 }
 如果question模糊不清，即使结合JSON的所有信息都无法辨别并给出答案。answer置为空list
+当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要任何解释、铺垫、客套或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答控制在50字以内，能用一句话就不用两句，能列点就列点（用顿号或分号分隔要点）
 """
 
 client = None
@@ -82,4 +85,26 @@ def request_ai(type, problem, options, img_url):
     response = get_ans(str(send))
     print(response)
     answer = json.loads(response).get("answer", [])
-    return answer if isinstance(answer, list) else [answer]
+    if not isinstance(answer, list):
+        answer = [answer]
+    answer = [str(item) for item in answer]
+
+    # Hard cap for subjective/fill-blank answers: the prompt asks for ≤50
+    # chars, but models occasionally over-explain — truncate as a safety net
+    # so long answers are not rejected or flagged as anomalous.
+    if type in ("主观题", "填空题"):
+        capped = []
+        for item in answer:
+            if len(item) > SUBJECTIVE_MAX_CHARS:
+                # cut at the last sentence boundary within the limit, else hard cut
+                cut = item[:SUBJECTIVE_MAX_CHARS]
+                for sep in ("。", "；", ";", "！", "？"):
+                    idx = cut.rfind(sep)
+                    if idx >= int(SUBJECTIVE_MAX_CHARS * 0.5):
+                        cut = cut[:idx + 1]
+                        break
+                capped.append(cut)
+            else:
+                capped.append(item)
+        answer = capped
+    return answer
