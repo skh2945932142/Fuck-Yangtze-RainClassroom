@@ -13,8 +13,10 @@ from util.ocr import ocr_form_url_image
 # Defaults keep the original ChatAnywhere behavior when env vars are absent.
 ai_base_url = os.getenv("AI_BASE_URL", "https://api.chatanywhere.tech/v1")
 ai_model = os.getenv("AI_MODEL", "gpt-4o-mini")
-# Hard character cap per blank/answer for subjective & fill-blank questions.
-SUBJECTIVE_MAX_CHARS = int(os.getenv("SUBJECTIVE_MAX_CHARS", "50"))
+# Safety-net cap for subjective/fill-blank answers: the prompt asks for a
+# concise answer (a few sentences), this only guards against runaway
+# model output, so it is generous rather than a strict limit.
+SUBJECTIVE_MAX_CHARS = int(os.getenv("SUBJECTIVE_MAX_CHARS", "200"))
 # Optional: disable the enncy question-bank lookup (empty key = skip).
 enncy_enabled = bool(os.getenv("ENNCY_KEY", ""))
 
@@ -34,7 +36,7 @@ options提供选项（如果选项为空，请从question中寻找，如果quest
 "answer":["A"]
 }
 如果question模糊不清，即使结合JSON的所有信息都无法辨别并给出答案。answer置为空list
-当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要任何解释、铺垫、客套或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答控制在50字以内，能用一句话就不用两句，能列点就列点（用顿号或分号分隔要点）
+当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要冗长的解释、铺垫或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答保持简短，几句话以内，能列点就列点（用顿号或分号分隔要点）
 """
 
 client = None
@@ -89,9 +91,9 @@ def request_ai(type, problem, options, img_url):
         answer = [answer]
     answer = [str(item) for item in answer]
 
-    # Hard cap for subjective/fill-blank answers: the prompt asks for ≤50
-    # chars, but models occasionally over-explain — truncate as a safety net
-    # so long answers are not rejected or flagged as anomalous.
+    # Safety net for subjective/fill-blank answers: the prompt already asks
+    # for a concise answer; this only kicks in on runaway output (200+ chars)
+    # so submissions stay a reasonable length.
     if type in ("主观题", "填空题"):
         capped = []
         for item in answer:
