@@ -1,6 +1,8 @@
+import base64
 import json
 import os
 
+import requests
 from openai import OpenAI
 from config import ai_key
 from util.enncy import search
@@ -13,6 +15,9 @@ from util.ocr import ocr_form_url_image
 # Defaults keep the original ChatAnywhere behavior when env vars are absent.
 ai_base_url = os.getenv("AI_BASE_URL", "https://api.chatanywhere.tech/v1")
 ai_model = os.getenv("AI_MODEL", "gpt-4o-mini")
+# Send the question image to multimodal models (vision) instead of OCR-only.
+# Auto-detect probes the model once; override with "1"/"0".
+vision_mode = os.getenv("VISION_MODE", "auto")
 # Safety-net cap for subjective/fill-blank answers: the prompt asks for a
 # concise answer (a few sentences), this only guards against runaway
 # model output, so it is generous rather than a strict limit.
@@ -39,7 +44,19 @@ options提供选项（如果选项为空，请从question中寻找，如果quest
 当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要冗长的解释、铺垫或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答保持简短，几句话以内，能列点就列点（用顿号或分号分隔要点）
 """
 
+vision_system_prompt = """
+你是一个考试答题助手。我会给你题目信息：question是题干文本，options是选项（key为选项字母，value为选项内容，可能为空）；如果附有图片，图片就是题目的原始截图（可能包含题干、电路图/图表和选项内容），必须仔细读图作答。
+回答JSON：
+{
+"thinking":"你简洁的思考过程",
+"answer":["A"]
+}
+answer格式由type决定：单选题给一个字母（如["A"]）；多选题给多个字母（如["A","C"]）；投票题给一个字母；填空题给文本数组（每个元素对应一个空，按顺序）；主观题给文本数组（通常一个元素，简洁直接，几句话以内，不要markdown）。
+必须把答案放在answer数组里。看不清图片且文字信息不足以判断时，answer置为空list。
+"""
+
 client = None
+_vision_supported = None
 
 
 def LLM_init(api_key: str):
@@ -52,15 +69,71 @@ def LLM_init(api_key: str):
     return client
 
 
-def get_ans(text):
+def _check_vision_support():
+    """Probe the model with a 1x1 image once; cache the result."""
+    global _vision_supported
+    if _vision_supported is not None:
+        return _vision_supported
+    tiny_png = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
+                "+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==")
+    try:
+        completion = client.chat.completions.create(
+            model=ai_model,
+            max_tokens=8,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "1"},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/png;base64,{tiny_png}"}},
+                ],
+            }],
+            timeout=20,
+        )
+        _vision_supported = bool(completion.choices)
+    except Exception as error:
+        print(f"视觉能力探测失败，回退OCR模式: {type(error).__name__}: {error}", flush=True)
+        _vision_supported = False
+    print(f"模型视觉能力: {'支持' if _vision_supported else '不支持'}", flush=True)
+    return _vision_supported
+
+
+def _download_image_b64(img_url):
+    """Download the question image and return a data: URI (base64)."""
+    try:
+        response = requests.get(img_url, timeout=15)
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "image/jpeg")
+        if content_type.startswith("text/"):
+            # CDN error page instead of an image
+            print("图片下载返回非图片内容，跳过视觉模式", flush=True)
+            return None
+        return f"data:{content_type};base64," + base64.b64encode(response.content).decode("ascii")
+    except Exception as error:
+        print(f"图片下载失败: {error!r}", flush=True)
+        return None
+
+
+def get_ans(text, image_data_uri=None):
     if client is None:
         raise Exception("LLM is not initialized")
+    if image_data_uri:
+        user_content = [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": image_data_uri}},
+        ]
+        messages = [
+            {'role': 'system', 'content': vision_system_prompt},
+            {'role': 'user', 'content': user_content}]
+    else:
+        messages = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': text}]
+
     completion = client.chat.completions.create(
         model=ai_model,
         response_format={"type": "json_object"},
-        messages=[
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': text}],
+        messages=messages,
     )
     return completion.choices[0].message.content
 
@@ -76,21 +149,31 @@ def _option_text(option):
 
 def request_ai(type, problem, options, img_url):
     problem_text = problem
-    # OCR when the question references an image (image-only questions, or
-    # choice questions whose option text lives in the slide image).
+    image_data_uri = None
+    # Image-dependent questions: body empty, options blank, or body mentions
+    # a figure — the actual content lives in the slide image.
     options_all_blank = (isinstance(options, list) and bool(options)
                          and all(not _option_text(o).strip() for o in options))
     needs_image = problem == "" or options_all_blank or "如图" in str(problem)
+
     if img_url and needs_image:
-        print("题目依赖图片 启用OCR识别", flush=True)
-        ocr_text = ocr_form_url_image(img_url)
-        if ocr_text:
-            print("OCR识别结果", ocr_text, flush=True)
-            # OCR text supplements the original body; image-only questions
-            # may have no body at all.
-            problem_text = f"{problem}\n{ocr_text}".strip() if problem else ocr_text
-        else:
-            print("OCR未识别到文字", flush=True)
+        use_vision = (vision_mode == "1"
+                      or (vision_mode == "auto" and LLM_init(ai_key) and _check_vision_support()))
+        if use_vision:
+            print("题目依赖图片 走多模态读图", flush=True)
+            image_data_uri = _download_image_b64(img_url)
+            if image_data_uri is None:
+                use_vision = False
+        if not use_vision:
+            print("题目依赖图片 启用OCR识别", flush=True)
+            ocr_text = ocr_form_url_image(img_url)
+            if ocr_text:
+                print("OCR识别结果", ocr_text, flush=True)
+                # OCR text supplements the original body; image-only questions
+                # may have no body at all.
+                problem_text = f"{problem}\n{ocr_text}".strip() if problem else ocr_text
+            else:
+                print("OCR未识别到文字", flush=True)
 
     LLM_init(ai_key)
     send = {
@@ -104,7 +187,7 @@ def request_ai(type, problem, options, img_url):
         print("搜题结果", enncy_result)
         send["searched"] = enncy_result
 
-    response = get_ans(str(send))
+    response = get_ans(str(send), image_data_uri=image_data_uri)
     print(response)
     answer = json.loads(response).get("answer", [])
     if not isinstance(answer, list):
