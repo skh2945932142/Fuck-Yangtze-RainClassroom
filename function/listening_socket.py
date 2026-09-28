@@ -316,24 +316,52 @@ def start_socket_ppt(ppt_jwt, socket_jwt, lesson_id, identity_id):
 
 
 # 多线程 多个上课同时监听
-def start_all_sockets(on_lesson_list):
-    threads = []
+# In-process registry of lessons that already have a listener thread, so the
+# 5-minute scan loop doesn't spawn duplicate listeners for the same lesson.
+# Keyed by lesson_id; value cleared when the thread exits (lesson finished).
+_active_listeners = {}
+_listeners_lock = threading.Lock()
 
+
+def is_lesson_listening(lesson_id):
+    with _listeners_lock:
+        return _active_listeners.get(lesson_id, False)
+
+
+def _run_socket_ppt_tracking(lesson_id, ppt_jwt, socket_jwt, identity_id):
+    try:
+        start_socket_ppt(
+            ppt_jwt=ppt_jwt,
+            socket_jwt=socket_jwt,
+            lesson_id=lesson_id,
+            identity_id=identity_id,
+        )
+    finally:
+        with _listeners_lock:
+            _active_listeners.pop(lesson_id, None)
+        print(f"课程 {lesson_id} 监听线程退出，后续扫描可重新进入", flush=True)
+
+
+def start_all_sockets(on_lesson_list):
+    started = []
     for item in on_lesson_list:
+        lesson_id = item["lesson_id"]
+        with _listeners_lock:
+            if _active_listeners.get(lesson_id):
+                continue  # already listening, skip duplicate
+            _active_listeners[lesson_id] = True
         t = threading.Thread(
-            target=start_socket_ppt,
+            target=_run_socket_ppt_tracking,
             kwargs={
+                "lesson_id": lesson_id,
                 "ppt_jwt": item["ppt_jwt"],
                 "socket_jwt": item["socket_jwt"],
-                "lesson_id": item["lesson_id"],
-                "identity_id": item["identity_id"]
+                "identity_id": item["identity_id"],
             }
         )
         t.start()
-        threads.append(t)
-
-    # for t in threads:
-    #     t.join()  # 等待所有线程结束（如果需要）
+        started.append(lesson_id)
+    return started
 
 
 # 答题
