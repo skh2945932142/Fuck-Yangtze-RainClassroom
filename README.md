@@ -154,7 +154,10 @@ zeabur service restart --id <服务ID> --env-id <环境ID> -i=false
 - cron 按学校上课时段（北京时间周一至五 7:00–20:00）**每 30 分钟**触发一次
 - `start.py` 是常驻进程，workflow 设了 **60 分钟超时**：单次 run 覆盖一个课时段的前 60 分钟，到点退出后由下一次 cron 接力（课堂中段的题目靠已建立的 WebSocket 监听，不依赖新 run）
 - `VISION_MODE` 读取的是仓库 **Variables**（Settings → Secrets and variables → Actions → Variables 标签页），其余配置读取 **Secrets**——两者位置不同，配错会读到空值
-- GitHub Actions 的 cron **不保证准时**（可能延迟数分钟甚至跳过），高峰时段公开仓库定时任务会被限流；重要课程建议用方式 A/C/D
+- **分钟数**：公开仓库（本项目的任何 fork）使用标准 runner 完全免费且不限量；私有克隆受 2000 分钟/月免费额度限制，本模式上课日全天约 13 小时 runner 时间会迅速超限——私有部署请选方式 A/C/D。监听/答题不产生额外分钟消耗（每个 run 固定跑满 60 分钟超时，与是否检测到课无关）
+- **60 天自动停用**：仓库连续 60 天无 commit 后 GitHub 会自动停掉定时 workflow——长期使用需定期推送任意提交，或在 Actions 页发现停用后手动 Enable
+- GitHub Actions 的 cron **不保证准时**（可能延迟数分钟甚至跳过），高峰时段定时任务会被限流；重要课程建议用方式 A/C/D
+- 长课堂注意：单次 run 60 分钟超时后由下一次 cron 接力（间隙最长约 30 分钟）；间隙内发布的题不会丢（重进后自动补答未答题），但若题目在间隙内关闭则错过
 - runner 在海外，网络到雨课堂服务端一般无碍，但 AI 端点需可公网访问
 - 每次 run 安装依赖约 1~2 分钟（paddleocr 较大），属于正常等待
 
