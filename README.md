@@ -89,7 +89,7 @@
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `FILTERED_COURSES` | 空 | 需监听答题的课程名，英文逗号分隔；空 = 全部课程 |
-| `SCAN_INTERVAL_SECONDS` | `300` | 课堂扫描间隔（秒） |
+| `SCAN_INTERVAL_SECONDS` | `300` | 守护进程内部的课堂扫描间隔（秒）；与 GHA 部署的 cron 触发间隔是两回事 |
 | `EMAIL_USER` | 空 | 发件邮箱（如 QQ 邮箱） |
 | `EMAIL_PASS` | 空 | 邮箱授权码（QQ 邮箱需在设置中开启 SMTP 并生成授权码，**不是 QQ 密码**） |
 | `TO_EMAIL` | 空 | 收件邮箱（可与发件相同） |
@@ -118,7 +118,7 @@ git clone https://github.com/<你的用户名>/Fuck-Yangtze-RainClassroom.git
 cd Fuck-Yangtze-RainClassroom
 
 # 2. 安装 Zeabur CLI 并登录
-npm install -g zeabur
+npm install -g zeabur            # Linux 报 EACCES 时改用: npm install -g --prefix ~/.local zeabur
 zeabur auth login
 
 # 3. 部署（项目 ID 用 zeabur project list 查）
@@ -147,14 +147,16 @@ zeabur service restart --id <服务ID> --env-id <环境ID> -i=false
 2. 仓库 **Settings → Secrets and variables → Actions** 添加 Secrets：
    - `SESSION`（必填）、`AI_KEY`（必填）
    - 可选：`AI_BASE_URL`、`AI_MODEL`、`ENNCY_KEY`、`FILTERED_COURSES`、`EMAIL_USER`、`EMAIL_PASS`、`TO_EMAIL`
-3. **Actions** 页启用 `Run start.py every 5 minutes on weekdays` workflow
+3. **Actions** 页启用 `Rain classroom auto answer (scheduled)` workflow
 
 行为说明：
 
-- cron 按学校上课时段（北京时间周一至五 7:00–20:00）每 5 分钟触发一次
-- `start.py` 是常驻进程，workflow 设了 **60 分钟超时**，到点退出后由下一次 cron 接力监听
-- GitHub Actions 的 cron **不保证准时**（可能延迟数分钟），且高频定时任务可能被限流；重要课程建议用方式 A/C/D
+- cron 按学校上课时段（北京时间周一至五 7:00–20:00）**每 30 分钟**触发一次
+- `start.py` 是常驻进程，workflow 设了 **60 分钟超时**：单次 run 覆盖一个课时段的前 60 分钟，到点退出后由下一次 cron 接力（课堂中段的题目靠已建立的 WebSocket 监听，不依赖新 run）
+- `VISION_MODE` 读取的是仓库 **Variables**（Settings → Secrets and variables → Actions → Variables 标签页），其余配置读取 **Secrets**——两者位置不同，配错会读到空值
+- GitHub Actions 的 cron **不保证准时**（可能延迟数分钟甚至跳过），高峰时段公开仓库定时任务会被限流；重要课程建议用方式 A/C/D
 - runner 在海外，网络到雨课堂服务端一般无碍，但 AI 端点需可公网访问
+- 每次 run 安装依赖约 1~2 分钟（paddleocr 较大），属于正常等待
 
 ### 方式 C：Docker（自有服务器 / NAS）
 
@@ -199,7 +201,7 @@ python start.py
 
 # 方式 D-2：config.ini（设置 IS_LOCAL=1 后从文件读取）
 export IS_LOCAL=1
-# 编辑 config.ini（SESSION/AI_KEY/ENNCY_KEY/课程过滤）
+# 编辑 config.ini（按行序：第1行 SESSION、第2行 AI_KEY、第3行 ENNCY_KEY、第4行 课程过滤）
 python start.py
 ```
 
