@@ -43,6 +43,13 @@ def _read_ini_field(index):
             return match.group(1)
     return ""
 
+if not isLocal and not os.environ.get("SESSION"):
+    raise SystemExit(
+        "缺少必填环境变量 SESSION（雨课堂 sessionid）。"
+        "获取方法见 README「获取 sessionid」一节；"
+        "Docker 用户请写入 .env 后重新 docker run；"
+        "本地用户也可以 export IS_LOCAL=1 并在 config.ini 里填写。"
+    )
 sessionId = _read_ini_field(0) if isLocal else os.environ["SESSION"]
 # email_user = str(re.search(r'\"(.*?)\"', config_file[1]).group(1)) if isLocal else os.environ["EMAIL_USER"]
 # email_pass = str(re.search(r'\"(.*?)\"', config_file[2]).group(1)) if isLocal else os.environ["EMAIL_PASS"]
