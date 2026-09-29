@@ -1,84 +1,270 @@
-# 长江雨课堂定时签到+听课答题
-**🌟 雨课堂、荷花、黄河等应该就HOST和API不同吧，可以自己试试，改下API应该就行?**
+# Changjiang-RainClassroom-Auto
 
-## 方法1 Github Actions
-### 🌟 说明
-默认设置为 每周一至周五7:00~22:00，每5min运行一次检查，若发现新的课程则写入log.json；需要定制运行时间，可修改cron表达式,自行学习,注意corn使用0时区时间，应在东八区时间-8
+> 长江雨课堂（changjiang.yuketang.cn）自动签到 + AI 随堂答题守护进程。
+> Fork 自 [Chiu-xaH/Fuck-Yangtze-RainClassroom](https://github.com/Chiu-xaH/Fuck-Yangtze-RainClassroom)，经真实课堂验证后大幅改造。
 
-**⚠️ Actions会存在延迟，并不是准时每5min检查一次**
+---
 
-**⚠️ 当进入监听答题状态后，后面的任务会排队，等待监听结束再运行，监听状态可能会半路结束，似乎是什么网络原因，不过有后面排队任务，崩了也能被接替**
+## ⚠️ 免责声明
 
-解决建议：
+- 本项目**仅供学习与技术研究**（雨课堂 Web 协议分析、LLM 应用实践），请勿用于任何违反你所在学校规定或法律法规的用途。
+- 使用自动答题功能**可能违反学校考试/课堂纪律规定**，由此产生的一切后果（包括但不限于成绩作废、纪律处分）由使用者自行承担。
+- 本项目与雨课堂、清华大学及其相关方没有任何关联。
+- 请勿将其用于替他人代答等商业用途。
 
-1.通过Github Actions API搭配自动化任务，定几个重要的上课时间节点，发送网络请求运行Action 
+---
 
-2.转到第二种食用方法-使用服务器部署自动任务，私有算力100%不会出错
+## ✨ 功能特性
 
-**⚠️ 安装依赖较大，约需要75秒后正式开始运行**
+| 功能 | 说明 |
+|---|---|
+| 🔍 常驻扫描 | 每 5 分钟检查一次是否有正在进行的课堂（间隔可调） |
+| ✅ 自动签到 | 发现课堂立即签到，扫描循环重启后幂等不重复 |
+| 📡 题目监听 | 开课时预缓存全部 PPT 中的题目，WebSocket 轮询感知老师发题（约 10 秒内） |
+| 🤖 AI 作答 | 接入任意 OpenAI 兼容 API；文本题直接作答 |
+| 👁️ 多模态视觉答题 | 图片题（电路图/图表等）把 slide 截图直接发给视觉模型读图作答；视觉不可用自动降级 PaddleOCR 文字识别 |
+| 📝 按题型提交 | 单选/多选/投票/填空/主观题各自正确的 payload 格式（修复了上游填空/主观题提交必失败的问题） |
+| 🎲 兜底策略 | AI 答不出时：选择题随机作答，文字题放弃提交（不留空白记录） |
+| 📧 失效邮件提醒 | SESSION 连续 3 轮失效（约 15 分钟）发邮件提醒，一次失效只发一封 |
+| 🔁 稳定性 | 多课并发每课单监听器（去重）、WebSocket 断线自动重连、下课自动退出 |
 
-**⚠️ 注意 若Cookie过期，Github会发邮件提示运行失败**
+## 🔧 工作原理
 
-### 🚀 开始配置
-1.按下面教程拿到SESSIONID，或者自己抓APP的包
+```
+┌──────────────┐   每5分钟    ┌─────────────┐   checkin   ┌──────────────┐
+│  守护进程     │ ──────────> │ 发现正在上课  │ ─────────> │ 签到并换取双JWT │
+└──────────────┘             └─────────────┘             └──────┬───────┘
+                                                                │
+                             ┌──────────────────────────────────┘
+                             ▼
+                    ┌───────────────────┐
+                    │ WebSocket 连入课堂  │
+                    │ (wss://.../wsapp/) │
+                    └─────────┬─────────┘
+                              │ hello 认证，拉取全部 PPT
+                              ▼
+                    ┌───────────────────┐
+                    │ 题目全量缓存        │  老师点"发题"= 服务端解锁题目ID
+                    └─────────┬─────────┘
+                              │ 轮询 unlockedproblem（~10s）
+                              ▼
+                 ┌────────────────────────────────┐
+                 │ 发现新题 → AI 作答 → 提交答案     │
+                 │ 文本题: 直答                      │
+                 │ 图片题: 视觉读图 (降级: OCR)      │
+                 └────────────────────────────────┘
+```
 
-2.按图中路径，配置名为SESSION的环境变量，值为SESSIONID的值
-![图片1](src/img/Step_1.png)
-![图片2](src/img/Step_2.png)
+核心机制：雨课堂的题目嵌在 PPT 里，开课时即可全量拉取；老师"发布题目"只是服务端把题目标记为解锁。因此**读题提前完成，发题到作答的延迟只取决于一次轮询周期 + 模型推理**（通常 15~30 秒）。
 
-3.继续在设置中，修改选项(为了写入日志)
-![图片3](src/img/Step_3.png)
+## 🍪 获取 sessionid
 
+1. 浏览器访问 [changjiang.yuketang.cn](https://changjiang.yuketang.cn/) 并登录（学校统一认证/微信扫码均可）
+2. 按 `F12` 打开开发者工具 → **Application**（应用）→ **Cookies** → `https://changjiang.yuketang.cn`
+3. 找到 `sessionid`（32 位字母数字），复制其 **Value**
 
-4.再配置两个secret，AI_KEY和ENNCY_KEY，用于搜题答题，获取方式在末尾
+> 提示：sessionid 有效期数天到两周不等。保持取值时的浏览器登录态，别在别处重复登录（可能顶掉会话）。
 
-5.再配置一个secret，FILTERED_COURSES，用英文逗号隔开，不要有空格，填写需要一直监听答题的课程，为空则代表所有课程都监听
+## ⚙️ 环境变量
 
-例如：计算机组成原理,数据结构
+### 必填
 
-6.去Action板块Run,观察运行结果，检查是否通过
-![图片4](src/img/Step_4.png)
+| 变量 | 说明 |
+|---|---|
+| `SESSION` | 雨课堂 sessionid（见上节） |
+| `AI_KEY` | 你的大模型 API Key |
 
-## 方法2 部署在服务器
-### 🌟 说明
+### AI 配置（可选）
 
-**⚠️ 注意 注意设置好运行自动化时的Cookie过期的提醒**
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `AI_BASE_URL` | `https://api.chatanywhere.tech/v1` | 任意 OpenAI 兼容端点 |
+| `AI_MODEL` | `gpt-4o-mini` | 模型名，建议用支持视觉的多模态模型 |
+| `VISION_MODE` | `auto` | 图片题作答方式：`auto`（自动探测视觉能力）/ `1`（强制视觉）/ `0`（强制 OCR） |
+| `SUBJECTIVE_MAX_CHARS` | `200` | 主观/填空题单条答案长度兜底上限 |
+| `ENNCY_KEY` | 空 | 言溪题库 key（[获取](https://tk.enncy.cn/)）；不填则纯 AI 作答 |
 
-### 🚀 开始配置
-1.进入config.py，修改isLocal变量为True
+### 课堂与通知（可选）
 
-2.填写config.ini
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `FILTERED_COURSES` | 空 | 需监听答题的课程名，英文逗号分隔；空 = 全部课程 |
+| `SCAN_INTERVAL_SECONDS` | `300` | 课堂扫描间隔（秒） |
+| `EMAIL_USER` | 空 | 发件邮箱（如 QQ 邮箱） |
+| `EMAIL_PASS` | 空 | 邮箱授权码（QQ 邮箱需在设置中开启 SMTP 并生成授权码，**不是 QQ 密码**） |
+| `TO_EMAIL` | 空 | 收件邮箱（可与发件相同） |
+| `EMAIL_HOST` | `smtp.qq.com` | SMTP 服务器 |
+| `EMAIL_PORT` | `465` | SMTP 端口（SSL） |
 
-3.安装依赖
+### 自动重登（可选，作用有限）
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `YKT_NAME` | 空 | 雨课堂手机号或邮箱 |
+| `YKT_PASSWORD` | 空 | 雨课堂密码 |
+| `YKT_LOGIN_TYPE` | `phone` | `phone` / `email` |
+
+> ⚠️ 实测：雨课堂登录接口被腾讯防水墙验证码保护，程序化密码登录基本会被拒（`300416`），**自动重登大概率失败**，仅作尽力尝试。SESSION 失效的可靠方案仍是邮件提醒 + 手动更新。
+
+## 🚀 部署方式
+
+### 方式 A：Zeabur（推荐，免服务器）
+
+PaaS 部署，Docker 构建，容器常驻运行，控制台可看日志。
+
 ```bash
+# 1. Fork 本仓库，克隆
+git clone https://github.com/<你的用户名>/Fuck-Yangtze-RainClassroom.git
+cd Fuck-Yangtze-RainClassroom
+
+# 2. 安装 Zeabur CLI 并登录
+npm install -g zeabur
+zeabur auth login
+
+# 3. 部署（项目 ID 用 zeabur project list 查）
+zeabur deploy --create --name rain-classroom --project-id <项目ID> -i=false
+
+# 4. 配置环境变量（也可在网页控制台填写）
+zeabur variable create --id <服务ID> --env-id <环境ID> -i=false -y \
+  -k "SESSION=<你的sessionid>" \
+  -k "AI_KEY=<你的key>" \
+  -k "AI_BASE_URL=<端点>" \
+  -k "AI_MODEL=<模型>"
+
+# 5. 重启生效（变量只在部署时注入）
+zeabur service restart --id <服务ID> --env-id <环境ID> -i=false
+```
+
+也可直接在 [Zeabur 控制台](https://zeabur.com) 网页上从 Git 创建服务，选本仓库即可（仓库自带 Dockerfile）。
+
+> 注意：环境变量**只在部署时注入容器**，改完变量需 Redeploy/Restart 才生效。
+
+### 方式 B：GitHub Actions（完全免费）
+
+无需任何服务器，利用 GitHub 托管 runner 定时运行。
+
+1. Fork 本仓库
+2. 仓库 **Settings → Secrets and variables → Actions** 添加 Secrets：
+   - `SESSION`（必填）、`AI_KEY`（必填）
+   - 可选：`AI_BASE_URL`、`AI_MODEL`、`ENNCY_KEY`、`FILTERED_COURSES`、`EMAIL_USER`、`EMAIL_PASS`、`TO_EMAIL`
+3. **Actions** 页启用 `Run start.py every 5 minutes on weekdays` workflow
+
+行为说明：
+
+- cron 按学校上课时段（北京时间周一至五 7:00–20:00）每 5 分钟触发一次
+- `start.py` 是常驻进程，workflow 设了 **60 分钟超时**，到点退出后由下一次 cron 接力监听
+- GitHub Actions 的 cron **不保证准时**（可能延迟数分钟），且高频定时任务可能被限流；重要课程建议用方式 A/C/D
+- runner 在海外，网络到雨课堂服务端一般无碍，但 AI 端点需可公网访问
+
+### 方式 C：Docker（自有服务器 / NAS）
+
+```bash
+git clone https://github.com/<你的用户名>/Fuck-Yangtze-RainClassroom.git
+cd Fuck-Yangtze-RainClassroom
+
+# 环境变量写进 .env 文件
+cat > .env <<'EOF'
+SESSION=你的sessionid
+AI_KEY=你的key
+AI_BASE_URL=https://api.deepseek.com/v1
+AI_MODEL=deepseek-chat
+FILTERED_COURSES=
+EOF
+
+docker build -t rain-classroom .
+docker run -d --name rain-classroom --restart unless-stopped --env-file .env rain-classroom
+
+# 看日志
+docker logs -f rain-classroom
+```
+
+### 方式 D：本地运行（最简单）
+
+```bash
+git clone https://github.com/<你的用户名>/Fuck-Yangtze-RainClassroom.git
+cd Fuck-Yangtze-RainClassroom
+
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-4.配置config.py中
-```python
-filtered_courses=[
-        # 默认为空 所有课题监听课程测试
-        # 若填写课程名称 则只监听列表里的课，其余课仅签到,建议按自己需求添加
-        "计算机组成原理","数据结构"
-]
-```
+# 方式 D-1：环境变量（推荐）
+export SESSION=xxx AI_KEY=xxx AI_BASE_URL=xxx AI_MODEL=xxx
+python start.py
 
-5.定时运行start.py(推荐使用宝塔面板定时任务，具体教程自行搜索)
-```bash
+# 方式 D-2：config.ini（设置 IS_LOCAL=1 后从文件读取）
+export IS_LOCAL=1
+# 编辑 config.ini（SESSION/AI_KEY/ENNCY_KEY/课程过滤）
 python start.py
 ```
 
+> 本地运行的电脑需在上课时段保持开机联网。
 
-## 获取SESSIONID方式
+## 🧠 AI 端点配置示例
 
-访问 https://changjiang.yuketang.cn/ ,登录后，按F12
-![图片1](src/screenShot/1.png)
-![图片2](src/screenShot/2.png)
-![图片3](src/screenShot/3.png)
-![图片4](src/screenShot/4.png)
+任何 OpenAI 兼容的 chat completions 端点均可：
 
-复制粘贴得到的id到config.txt，并保存即可
+| 提供商 | `AI_BASE_URL` | `AI_MODEL` 示例 | 视觉 |
+|---|---|---|---|
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-chat` | ❌ |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4v-flash` | ✅ |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-vl-plus` | ✅ |
+| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` | ✅ |
+| ChatAnywhere | `https://api.chatanywhere.tech/v1` | `gpt-4o-mini` | ❌ |
 
-## [获取AI_KEY(AI 用于解题或辅助题库搜题规格化答案)](https://api.chatanywhere.org/v1/oauth/free/render)
-## [获取ENNCY_KEY(言溪题库 用于题目为空时搜题)](https://tk.enncy.cn/)
+> 图片题（电路图等）需要视觉能力才能读图作答；纯文本模型会自动降级 OCR（只能识别图里的文字，看不懂图形结构）。**推荐搭配一个多模态模型**。
 
+## ❓ FAQ
+
+**Q: SESSION 多久失效？失效了怎么办？**
+数天到两周不等。配置了邮箱提醒（`EMAIL_USER`/`EMAIL_PASS`/`TO_EMAIL`）后，连续 3 轮扫描失效会收到邮件；按邮件指引重新取 sessionid，更新到部署平台的环境变量并重启即可。手机上操作全流程约 5 分钟（浏览器登录 → F12 取值 → 平台控制台更新）。
+
+**Q: 自动重登（YKT_NAME/YKT_PASSWORD）能用吗？**
+实测被腾讯防水墙拦截（`300416 腾讯防水墙校验失败`），密码登录接口强制要求验证码 ticket，程序化登录基本不可行。配置了会在失效时自动尝试一次，失败则走邮件提醒，无副作用。
+
+**Q: 图片题答空了是怎么回事？**
+图片题的题干和选项内容往往在 slide 截图里。视觉模式下模型直接读图作答；若模型不支持视觉或图片下载失败，降级 OCR 提取文字。两者都拿不到有效信息时，选择题会随机作答、文字题放弃提交。
+
+**Q: 日志在哪里看？**
+Zeabur/Docker 看容器日志；本地直接看终端输出。关键日志行：`发现上课`（进入课堂）、`发现 N 道新题`（题目缓存）、`单选题/多选题/主观题 …`（开始作答）、`答题成功`/`答题失败`（提交结果）。
+
+**Q: 支持普通版雨课堂（www.yuketang.cn）或其他学校版吗？**
+本项目针对**长江雨课堂**（changjiang.yuketang.cn）。理论上改 `config.py` 里的 `host` 与 WebSocket 地址可适配其他部署（荷塘/黄河雨课堂），未验证。
+
+**Q: 老师用"随机抽题"或课后回放发的题能答吗？**
+不能。本项目依赖"开课时题目已在 PPT 中可预缓存"这一机制；发布时才生成/下发的题目（随机抽题、临时新建题）拿不到题面。
+
+## ⚠️ 已知限制
+
+- 依赖题目预缓存机制，随机抽题/临时发题场景失效
+- 自动答题行为（秒答、作答时间）可能被教学平台统计分析识别
+- 雨课堂协议变更会导致功能失效（接口路径、WebSocket 消息格式）
+- 高峰期雨课堂服务端偶发认证抖动（瞬时 `UNAUTHENTICATED` 后自愈），守护进程已做容忍
+
+## 🛠️ 开发
+
+```bash
+# 运行测试（8 个用例：消息处理/去重/重连/答题格式等）
+python -m unittest discover tests -v
+```
+
+代码结构：
+
+```
+start.py                     # 常驻守护进程入口（扫描循环）
+config.py                    # 配置与环境变量
+function/check_in.py         # 课堂发现、签到、失效检测与邮件通知
+function/listening_socket.py # WebSocket 监听、题目缓存、答题提交
+function/login.py            # 密码登录（RSA 加密，受防水墙限制）
+util/ai.py                   # LLM 调用（文本/视觉双模式）
+util/ocr.py                  # PaddleOCR 延迟加载
+util/notice.py               # 邮件通知
+tests/                       # 单元测试
+```
+
+## 📜 致谢与许可
+
+- 上游项目：[Chiu-xaH/Fuck-Yangtze-RainClassroom](https://github.com/Chiu-xaH/Fuck-Yangtze-RainClassroom)（Apache-2.0）
+- AI 部分参考：[tinyvan/SecondClass](https://github.com/tinyvan/SecondClass)
+- 答题提交格式参考：[infstellar/RainClassroomAssistant](https://github.com/infstellar/RainClassroomAssistant)
+
+本项目以 Apache-2.0 许可发布，见 [LICENSE](LICENSE)。

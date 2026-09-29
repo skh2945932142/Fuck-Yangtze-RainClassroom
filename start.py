@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 
@@ -9,7 +10,7 @@ from util.timestamp import get_now
 # service is a long-running process, so we loop instead: scan for ongoing
 # lessons every SCAN_INTERVAL_SECONDS. In-lesson listening sockets keep their
 # own threads; this loop only discovers lessons and hands them over.
-SCAN_INTERVAL_SECONDS = 300
+SCAN_INTERVAL_SECONDS = int(os.getenv("SCAN_INTERVAL_SECONDS", "300"))
 
 
 def main_loop():

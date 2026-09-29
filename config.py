@@ -99,11 +99,9 @@ def get_filtered_courses_from_env():
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+# 课程过滤：逗号分隔课程名，为空 = 监听全部课程
 if isLocal:
-    filtered_courses = [
-        # 默认为空 所有课题监听课程测试
-        # 若填写课程名称 则只监听列表里的课，其余课仅签到,建议按自己需求添加
-        "计算机组成原理", "数据结构", "牢大"
-    ]
+    _raw_courses = _read_ini_field(3)
+    filtered_courses = [s.strip() for s in _raw_courses.split(",") if s.strip()]
 else:
     filtered_courses = get_filtered_courses_from_env()
