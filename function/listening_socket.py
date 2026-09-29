@@ -6,7 +6,7 @@ import requests
 import websocket
 import json
 from config import host, api, headers, question_type
-from util.notice import email_notice
+from util.notice import answer_failed_notice
 from util.ai import request_ai
 from util.timestamp import get_date_time
 
@@ -33,7 +33,7 @@ def send_if_connected(ws, payload):
 def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second=10,
                        stop_event=None, answered_problem_ids=None,
                        processing_problem_ids=None, seen_problem_ids=None,
-                       problem_state_lock=None):
+                       problem_state_lock=None, course_name=None):
     problem_list = dict()
     if answered_problem_ids is None:
         answered_problem_ids = set()
@@ -92,7 +92,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                                     problem_content=problem["content"],
                                     options=problem["options"],
                                     jwt=ppt_jwt,
-                                    img_url=problem["img_url"]
+                                    img_url=problem["img_url"],
+                                    course_name=problem["course_name"],
                                 )
                                 if answered:
                                     with problem_state_lock:
@@ -164,7 +165,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                                     "type": question["problemType"],
                                     "content": question["body"],
                                     "options": options,
-                                    "img_url": ppt["coverAlt"]
+                                    "img_url": ppt["coverAlt"],
+                                    "course_name": course_name,
                                 }
                                 with problem_state_lock:
                                     if question["problemId"] not in seen_problem_ids:
@@ -270,7 +272,7 @@ def on_open_connet(jwt, lesson_id, identity_id):
 
 
 # 监听上课
-def start_socket_ppt(ppt_jwt, socket_jwt, lesson_id, identity_id):
+def start_socket_ppt(ppt_jwt, socket_jwt, lesson_id, identity_id, course_name=None):
     stop_event = threading.Event()
     reconnect_attempt = 0
     answered_problem_ids = set()
@@ -289,6 +291,7 @@ def start_socket_ppt(ppt_jwt, socket_jwt, lesson_id, identity_id):
             processing_problem_ids=processing_problem_ids,
             seen_problem_ids=seen_problem_ids,
             problem_state_lock=problem_state_lock,
+            course_name=course_name,
         )
         ws = websocket.WebSocketApp(
             url=api["websocket"],
@@ -329,13 +332,14 @@ def is_lesson_listening(lesson_id):
         return _active_listeners.get(lesson_id, False)
 
 
-def _run_socket_ppt_tracking(lesson_id, ppt_jwt, socket_jwt, identity_id):
+def _run_socket_ppt_tracking(lesson_id, ppt_jwt, socket_jwt, identity_id, course_name=None):
     try:
         start_socket_ppt(
             ppt_jwt=ppt_jwt,
             socket_jwt=socket_jwt,
             lesson_id=lesson_id,
             identity_id=identity_id,
+            course_name=course_name,
         )
     finally:
         with _listeners_lock:
@@ -358,6 +362,7 @@ def start_all_sockets(on_lesson_list):
                 "ppt_jwt": item["ppt_jwt"],
                 "socket_jwt": item["socket_jwt"],
                 "identity_id": item["identity_id"],
+                "course_name": item.get("course_name"),
             }
         )
         t.start()
@@ -385,10 +390,16 @@ def format_result(problem_type, answer):
     return answer
 
 
-def answer(problem_id, problem_type, jwt, problem_content, options, img_url):
+def answer(problem_id, problem_type, jwt, problem_content, options, img_url, course_name=None):
     print(question_type[problem_type], problem_content, options, img_url)
 
-    raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)
+    try:
+        raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)
+    except Exception as error:
+        print(f"AI 调用异常: {type(error).__name__}: {error!r}", flush=True)
+        answer_failed_notice(course_name, question_type[problem_type],
+                             problem_content, f"AI 调用异常（{type(error).__name__}）")
+        return False
 
     # LLM could not determine the answer (returned empty list): submitting a
     # blank is worse than not submitting — it records an instant blank answer
@@ -406,6 +417,8 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url):
             raw_answer = guess
         else:
             print("答案为空且非选择题，放弃本次作答", flush=True)
+            answer_failed_notice(course_name, question_type[problem_type],
+                                 problem_content, "AI 无法判断答案（非选择题，未提交）")
             return False
 
     post_json = {
@@ -428,11 +441,15 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url):
         print("答题成功")
         return True
     else:
-        email_notice(content="答题失败，请手动前往雨课堂", subject="答题失败")
         print("答题失败")
-        msg = response.json()["msg"]
+        try:
+            msg = response.json().get("msg", response.text[:100])
+        except ValueError:
+            msg = response.text[:100]
         if msg == "LESSON_END":
             print("题目已经结束")
         else:
-            print(msg)
+            print(msg, flush=True)
+        answer_failed_notice(course_name, question_type[problem_type],
+                             problem_content, f"提交被拒（HTTP {response.status_code}: {msg}）")
         return False

@@ -169,6 +169,10 @@ AI_KEY=你的key
 AI_BASE_URL=https://api.deepseek.com/v1
 AI_MODEL=deepseek-chat
 FILTERED_COURSES=
+# 失效/答题失败邮件提醒（用你自己的邮箱发送）
+EMAIL_USER=你的邮箱@qq.com
+EMAIL_PASS=邮箱SMTP授权码
+TO_EMAIL=你的邮箱@qq.com
 EOF
 
 docker build -t rain-classroom .
@@ -177,6 +181,8 @@ docker run -d --name rain-classroom --restart unless-stopped --env-file .env rai
 # 看日志
 docker logs -f rain-classroom
 ```
+
+> 邮件提醒通过你自己的邮箱 SMTP 发送（发件人 = 收件人 = 你）。QQ 邮箱需先在 **设置 → 账户 → POP3/SMTP 服务** 中开启并生成**授权码**（不是 QQ 密码）。SESSION 连续 3 轮失效或答题失败时你会收到带处理指引的邮件（Docker 部署的指引是"更新 .env 后 `docker restart`"）。
 
 ### 方式 D：本地运行（最简单）
 

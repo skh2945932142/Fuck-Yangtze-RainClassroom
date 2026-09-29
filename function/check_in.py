@@ -6,7 +6,7 @@ from function.user import get_user_name
 from config import host, api, headers, log_file_name, check_in_sources, \
     ykt_name, ykt_password, ykt_login_type, set_session_id
 from util.file import write_log, read_log
-from util.notice import email_notice
+from util.notice import email_notice, session_expired_notice
 from util.timestamp import get_now
 
 
@@ -35,16 +35,7 @@ def get_listening():
                 _notice_sent = False
             elif (_session_failure_count >= SESSION_FAILURE_NOTICE_THRESHOLD
                   and not _notice_sent):
-                email_notice(
-                    subject="雨课堂 SESSION 失效，请更新",
-                    content=(
-                        "雨课堂监听服务的 SESSION 已连续 "
-                        f"{_session_failure_count} 轮失效，自动重登未成功。\n\n"
-                        "请重新登录 changjiang.yuketang.cn 获取新的 sessionid，"
-                        "更新到 Zeabur 服务的 SESSION 环境变量并重启服务。\n\n"
-                        "（此提醒只发一次，恢复后计数重置）"
-                    ),
-                )
+                session_expired_notice(_session_failure_count)
                 _notice_sent = True
             return None
         _session_failure_count = 0

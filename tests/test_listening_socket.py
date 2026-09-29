@@ -18,6 +18,8 @@ def _install_optional_dependency_stubs():
     ai.request_ai = lambda **_kwargs: ""
     notice = types.ModuleType("util.notice")
     notice.email_notice = lambda **_kwargs: None
+    notice.session_expired_notice = lambda *_args, **_kwargs: None
+    notice.answer_failed_notice = lambda *_args, **_kwargs: None
     timestamp = types.ModuleType("util.timestamp")
     timestamp.get_date_time = lambda: ""
     sys.modules.setdefault("util.ai", ai)
