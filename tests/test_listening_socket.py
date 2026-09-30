@@ -219,6 +219,64 @@ class ListeningSocketTests(unittest.TestCase):
         self.assertEqual({"q1"}, answered_ids)
         self.assertEqual(1, output.getvalue().count("发现 1 道新题"))
 
+
+    def test_unlockproblem_push_triggers_answer_immediately(self):
+        answer_calls = []
+        ws = FakeWebSocket()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "q9",
+                     "problemType": 1, "body": "push question", "options": [], "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), True)[1]
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0, course_name="电路",
+        )
+        try:
+            # hello reply caches the problem
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            self.assertEqual(0, len(answer_calls))
+            # server push: teacher publishes -> answer fires without any poll
+            on_message(ws, json.dumps({"op": "unlockproblem", "problem": {"prob": "q9"}}))
+            on_message.pending_messages.join()
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+
+        self.assertEqual(1, len(answer_calls))
+        self.assertEqual("电路", answer_calls[0]["course_name"])
+        # push handler must also re-arm the poll loop (fetchtimeline sent)
+        self.assertTrue(any(json.loads(p)["op"] == "fetchtimeline" for p in ws.sent))
+
+    def test_unlockproblem_push_for_uncached_problem_requests_resweep(self):
+        ws = FakeWebSocket()
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "unlockproblem", "problem": {"prob": "unknown-q"}}))
+            on_message.pending_messages.join()
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+
+        ops = [json.loads(p)["op"] for p in ws.sent]
+        self.assertIn("fetchtimeline", ops)  # asks for resweep/poll
+
     def test_notification_is_ignored_without_follow_up_send(self):
         ws = FakeWebSocket()
         on_message = listening_socket.on_message_connect(

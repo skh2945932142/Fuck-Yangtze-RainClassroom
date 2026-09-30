@@ -122,6 +122,65 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                     "lessonid": str(lesson_id),
                     "msgid": 1
                 })
+        elif action == "unlockproblem":
+            # Teacher just pushed a problem (server push at publish time) —
+            # answer immediately instead of waiting for the next poll cycle.
+            # Reference implementations rely on this push, not polling.
+            problem = msg_json.get("problem", {})
+            q_id = problem.get("prob") or problem.get("problemid")
+            if q_id is not None:
+                print(f"[push] 收到发题推送: {q_id}", flush=True)
+                with problem_state_lock:
+                    should_answer = (q_id not in answered_problem_ids
+                                     and q_id not in processing_problem_ids)
+                    if should_answer:
+                        processing_problem_ids.add(q_id)
+                if should_answer:
+                    try:
+                        cached = problem_list.get(q_id)
+                        if cached is not None:
+                            answered = answer(
+                                problem_id=q_id,
+                                problem_type=cached["type"],
+                                problem_content=cached["content"],
+                                options=cached["options"],
+                                jwt=ppt_jwt,
+                                img_url=cached["img_url"],
+                                course_name=course_name,
+                            )
+                            if answered:
+                                with problem_state_lock:
+                                    answered_problem_ids.add(q_id)
+                        else:
+                            # Not cached yet: sweep presentations again (the
+                            # new problem may live in an updated PPT), then
+                            # leave it to the poll loop to answer.
+                            print(f"[push] 题目 {q_id} 未缓存，重新拉取课件", flush=True)
+                            send_if_connected(ws, {
+                                "op": "fetchtimeline",
+                                "lessonid": str(lesson_id),
+                                "msgid": 1
+                            })
+                    finally:
+                        with problem_state_lock:
+                            processing_problem_ids.discard(q_id)
+            # keep the poll loop alive
+            send_if_connected(ws, {
+                "op": "fetchtimeline",
+                "lessonid": str(lesson_id),
+                "msgid": 1
+            })
+        elif action in ("presentationupdated", "presentationcreated"):
+            # Teacher switched/added a PPT — re-sweep so new problems get
+            # cached, then resume polling.
+            print(f"[push] 课件更新: {action}", flush=True)
+            send_if_connected(ws, {
+                "op": "hello",
+                "userid": identity_id,
+                "role": "student",
+                "auth": socket_jwt,
+                "lessonid": lesson_id
+            })
         else:
             # 首次获取PPT内容，进而保存所有题目
             # 解析出pres_id
@@ -198,6 +257,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                   f"含题 {total_problems_found} 道，本回合新缓存 {new_problem_count} 道", flush=True)
             if stopped():
                 return
+            # hello replies can carry already-unlocked problems (joining after
+            # the teacher published) — surface them via the poll immediately.
             send_if_connected(ws, {
                 "op": "fetchtimeline",
                 "lessonid": str(lesson_id),
