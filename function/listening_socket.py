@@ -59,6 +59,16 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
             # time_lines = msg_json.get("timeline", [])
             # 过滤 time_lines["type"]!="problem"移除列表
             time_lines = msg_json.get("unlockedproblem",[])
+            # Polling observability: leave evidence of what the server sent so
+            # live-class issues (empty unlock lists, unknown IDs) are diagnosable.
+            known = [q for q in time_lines if q in problem_list]
+            unknown = [q for q in time_lines if q not in problem_list]
+            if time_lines or problem_list:
+                print(f"[poll] unlocked={len(time_lines)} known={len(known)} "
+                      f"unknown={len(unknown)} cached={len(problem_list)} "
+                      f"answered={len(answered_problem_ids)}", flush=True)
+                if unknown:
+                    print(f"[poll] 未缓存的题目ID: {unknown}", flush=True)
             # 最新的题目
             if len(time_lines) == 0:
                 # 没题可答，继续获取PPT内容，看看是否老师换了新的PPT文件
@@ -136,6 +146,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                 "Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0")
 
             new_problem_count = 0
+            total_problems_found = 0
+            total_slides = 0
             for pres_id in ppt_ids:
                 if stopped():
                     return
@@ -144,6 +156,9 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                 response = requests.get(headers=new_headers, url=url, timeout=15)
                 if response.status_code == 200:
                     ppt_pages = response.json()["data"]["slides"]
+                    total_slides += len(ppt_pages)
+                    slides_with_problem = [p for p in ppt_pages if "problem" in p]
+                    total_problems_found += len(slides_with_problem)
                     for ppt in ppt_pages:
                         # 有答题
                         if "problem" in ppt:
@@ -179,6 +194,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
             # 这是发送一次
             if new_problem_count:
                 print(f"发现 {new_problem_count} 道新题，继续监听", flush=True)
+            print(f"[ppt] 课件 {len(ppt_ids)} 份共 {total_slides} 页 / "
+                  f"含题 {total_problems_found} 道，本回合新缓存 {new_problem_count} 道", flush=True)
             if stopped():
                 return
             send_if_connected(ws, {
