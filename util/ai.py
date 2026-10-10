@@ -21,7 +21,7 @@ vision_mode = os.getenv("VISION_MODE", "auto")
 # Safety-net cap for subjective/fill-blank answers: the prompt asks for a
 # concise answer (a few sentences), this only guards against runaway
 # model output, so it is generous rather than a strict limit.
-SUBJECTIVE_MAX_CHARS = int(os.getenv("SUBJECTIVE_MAX_CHARS", "200"))
+SUBJECTIVE_MAX_CHARS = int(os.getenv("SUBJECTIVE_MAX_CHARS", "30"))
 # Optional: disable the enncy question-bank lookup (empty key = skip).
 enncy_enabled = bool(os.getenv("ENNCY_KEY", ""))
 
@@ -41,7 +41,7 @@ options提供选项（如果选项为空，请从question中寻找，如果quest
 "answer":["A"]
 }
 如果question模糊不清，即使结合JSON的所有信息都无法辨别并给出答案。answer置为空list
-当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要冗长的解释、铺垫或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答保持简短，几句话以内，能列点就列点（用顿号或分号分隔要点）
+当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要冗长的解释、铺垫或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答控制在20字左右（不超过30字），一句话直接给出要点，能列点就列点（用顿号或分号分隔要点）
 """
 
 vision_system_prompt = """
@@ -51,7 +51,7 @@ vision_system_prompt = """
 "thinking":"你简洁的思考过程",
 "answer":["A"]
 }
-answer格式由type决定：单选题给一个字母（如["A"]）；多选题给多个字母（如["A","C"]）；投票题给一个字母；填空题给文本数组（每个元素对应一个空，按顺序）；主观题给文本数组（通常一个元素，简洁直接，几句话以内，不要markdown）。
+answer格式由type决定：单选题给一个字母（如["A"]）；多选题给多个字母（如["A","C"]）；投票题给一个字母；填空题给文本数组（每个元素对应一个空，按顺序）；主观题给文本数组（通常一个元素，20字左右，不超过30字，不要markdown）。
 必须把答案放在answer数组里。看不清图片且文字信息不足以判断时，answer置为空list。
 """
 

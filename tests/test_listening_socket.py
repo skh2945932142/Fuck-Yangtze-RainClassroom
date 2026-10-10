@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+import time
 import types
 import unittest
 
@@ -131,7 +132,6 @@ class ListeningSocketTests(unittest.TestCase):
 
     def test_multiple_unlocked_questions_trigger_one_follow_up_poll(self):
         ws = FakeWebSocket()
-        answer_calls = []
 
         class FakeResponse:
             status_code = 200
@@ -144,9 +144,7 @@ class ListeningSocketTests(unittest.TestCase):
                 ]}}
 
         original_get = listening_socket.requests.get
-        original_answer = listening_socket.answer
         listening_socket.requests.get = lambda **_kwargs: FakeResponse()
-        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), True)[1]
         on_message = listening_socket.on_message_connect(
             ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
             socket_jwt="socket", sleep_second=0,
@@ -159,16 +157,18 @@ class ListeningSocketTests(unittest.TestCase):
             on_message.pending_messages.join()
         finally:
             on_message.stop_processing()
+            on_message.pending_messages.join()
             listening_socket.requests.get = original_get
-            listening_socket.answer = original_answer
 
-        self.assertEqual(2, len(answer_calls))
-        self.assertEqual(2, sum(json.loads(payload)["op"] == "fetchtimeline" for payload in ws.sent))
+        # Poll replies carry IDs only: one probleminfo deadline query per
+        # question, plus exactly one follow-up fetchtimeline for the batch.
+        queries = [json.loads(p) for p in ws.sent]
+        self.assertEqual(2, sum(q["op"] == "probleminfo" for q in queries))
+        self.assertEqual(2, sum(q["op"] == "fetchtimeline" for q in queries))
 
     def test_answered_question_is_not_reprocessed_after_reconnect(self):
         answered_ids = set()
         seen_ids = set()
-        answer_calls = []
         get_calls = []
         output = io.StringIO()
 
@@ -190,11 +190,13 @@ class ListeningSocketTests(unittest.TestCase):
         original_get = listening_socket.requests.get
         original_answer = listening_socket.answer
         listening_socket.requests.get = lambda **kwargs: (get_calls.append(kwargs), FakeResponse())[1]
-        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), True)[1]
+        listening_socket.answer = lambda **kwargs: True  # thread marks q1 answered instantly
+        wss = []
         try:
             with contextlib.redirect_stdout(output):
-                for _ in range(2):
+                for i in range(2):
                     ws = FakeWebSocket()
+                    wss.append(ws)
                     on_message = listening_socket.on_message_connect(
                         ppt_jwt="ppt",
                         lesson_id="lesson",
@@ -209,13 +211,28 @@ class ListeningSocketTests(unittest.TestCase):
                     ]}))
                     on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["q1"]}))
                     on_message.pending_messages.join()
+                    if i == 0:
+                        # complete round 1: server replies with the deadline,
+                        # the answer thread marks q1 answered
+                        on_message(ws, json.dumps({"op": "probleminfo", "problemid": "q1",
+                                                   "limit": 30, "now": 0, "dt": 0}))
+                        on_message.pending_messages.join()
+                        for _ in range(100):
+                            if "q1" in answered_ids:
+                                break
+                            time.sleep(0.02)
                     on_message.stop_processing()
         finally:
             listening_socket.requests.get = original_get
             listening_socket.answer = original_answer
 
+        # Round 1: q1 unanswered -> one deadline query sent. Round 2: q1
+        # already answered (shared answered_ids) -> no new query, PPT refetch.
         self.assertEqual(2, len(get_calls))
-        self.assertEqual(1, len(answer_calls))
+        first = [json.loads(p) for p in wss[0].sent if json.loads(p)["op"] == "probleminfo"]
+        second = [json.loads(p) for p in wss[1].sent if json.loads(p)["op"] == "probleminfo"]
+        self.assertEqual(1, len(first))
+        self.assertEqual(0, len(second))
         self.assertEqual({"q1"}, answered_ids)
         self.assertEqual(1, output.getvalue().count("发现 1 道新题"))
 
@@ -250,6 +267,10 @@ class ListeningSocketTests(unittest.TestCase):
             # server push: teacher publishes -> answer fires without any poll
             on_message(ws, json.dumps({"op": "unlockproblem", "problem": {"prob": "q9"}}))
             on_message.pending_messages.join()
+            for _ in range(100):
+                if answer_calls:
+                    break
+                time.sleep(0.02)
         finally:
             on_message.stop_processing()
             on_message.pending_messages.join()
@@ -276,6 +297,54 @@ class ListeningSocketTests(unittest.TestCase):
 
         ops = [json.loads(p)["op"] for p in ws.sent]
         self.assertIn("fetchtimeline", ops)  # asks for resweep/poll
+
+    def test_probleminfo_reply_spawns_delayed_answer(self):
+        answer_calls = []
+        ws = FakeWebSocket()
+        now_ms = 2_000_000_000_000
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "q5",
+                     "problemType": 4, "body": "fill me", "options": None, "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), True)[1]
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["q5"]}))
+            on_message.pending_messages.join()
+            # server replies: 30 seconds left on the clock
+            on_message(ws, json.dumps({"op": "probleminfo", "problemid": "q5",
+                                       "limit": 30, "now": now_ms, "dt": now_ms}))
+            on_message.pending_messages.join()
+            for _ in range(100):
+                if answer_calls:
+                    break
+                time.sleep(0.02)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+
+        self.assertEqual(1, len(answer_calls))
+        target = answer_calls[0]["delay_until_ts"]
+        self.assertIsNotNone(target)
+        # deadline = now + 30s; submit target = deadline - 15s => ~now + 15s
+        self.assertAlmostEqual(time.time() + 15, target, delta=2)
 
     def test_notification_is_ignored_without_follow_up_send(self):
         ws = FakeWebSocket()

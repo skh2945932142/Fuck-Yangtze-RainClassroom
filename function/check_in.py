@@ -4,7 +4,8 @@ from function.listening_socket import start_all_sockets
 from function.login import login
 from function.user import get_user_name
 from config import host, api, headers, log_file_name, check_in_sources, \
-    ykt_name, ykt_password, ykt_login_type, set_session_id
+    ykt_name, ykt_password, ykt_login_type, set_session_id, \
+    exclude_courses
 from util.file import write_log, read_log
 from util.notice import email_notice, session_expired_notice
 from util.timestamp import get_now
@@ -102,7 +103,10 @@ def get_listening_classes_and_sign(filtered_courses: list):
                             "course_name": course_name
                         })
 
-                    if len(filtered_courses) == 0:  # 无需过滤 全部进入监听队列
+                    # Blacklist wins: excluded courses sign in but never answer.
+                    if course_name in exclude_courses:
+                        print(f"{course_name} 在排除名单(EXCLUDE_COURSES)，仅签到不答题")
+                    elif len(filtered_courses) == 0:  # 无需过滤 全部进入监听队列
                         queue_on_listening_task()
                     else:  # 只监听符合条件的课程 其余的就签到
                         if course_name in filtered_courses:

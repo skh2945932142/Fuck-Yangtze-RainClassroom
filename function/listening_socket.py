@@ -1,14 +1,35 @@
 import queue
 import random
 import threading
+import time
 
 import requests
 import websocket
 import json
-from config import host, api, headers, question_type
+from config import host, api, headers, question_type, submit_before_deadline_seconds
 from util.notice import answer_failed_notice
 from util.ai import request_ai
 from util.timestamp import get_date_time
+
+def deadline_from_limit(limit, now=None, dt=None):
+    """Convert a problem's `limit` (seconds, -1 = no limit; `now`/`dt` are
+    server millisecond clocks from probleminfo replies) into an epoch
+    deadline. Returns None when the problem has no deadline."""
+    if limit is None or int(limit) == -1:
+        return None
+    if now is not None and dt is not None:
+        time_left = int(limit) - (int(now) - int(dt)) / 1000
+    else:
+        time_left = int(limit)
+    return time.time() + max(time_left, 0)
+
+
+def submit_target(deadline_ts):
+    """Target submit moment: deadline minus the hold margin."""
+    if deadline_ts is None:
+        return None
+    return deadline_ts - submit_before_deadline_seconds
+
 
 PING_INTERVAL_SECONDS = 30
 PING_TIMEOUT_SECONDS = 10
@@ -46,6 +67,72 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
     processor_stop = threading.Event()
     messages = queue.Queue()
     reported_errors = set()
+    queried_problem_ids = set()  # probleminfo queries already sent
+
+    def spawn_answer(q_id, delay_until_ts):
+        """Answer q_id in its own thread so the message loop never blocks.
+
+        The thread generates the AI answer immediately, then holds the
+        submission until delay_until_ts (deadline - margin)."""
+        problem = problem_list.get(q_id)
+        if problem is None:
+            return False
+        with problem_state_lock:
+            if q_id in answered_problem_ids or q_id in processing_problem_ids:
+                return False
+            processing_problem_ids.add(q_id)
+
+        def run():
+            try:
+                ok = answer(
+                    problem_id=q_id,
+                    problem_type=problem["type"],
+                    problem_content=problem["content"],
+                    options=problem["options"],
+                    jwt=ppt_jwt,
+                    img_url=problem["img_url"],
+                    course_name=problem["course_name"],
+                    delay_until_ts=delay_until_ts,
+                )
+                if ok:
+                    with problem_state_lock:
+                        answered_problem_ids.add(q_id)
+                        problem_list.pop(q_id, None)
+            finally:
+                with problem_state_lock:
+                    processing_problem_ids.discard(q_id)
+
+        threading.Thread(target=run, daemon=True, name=f"answer-{q_id}").start()
+        return True
+
+    def query_deadline(ws, q_id):
+        """Ask the server for the problem's remaining time (probleminfo).
+        Falls back to answering without delay if no reply arrives."""
+        with problem_state_lock:
+            if (q_id in queried_problem_ids or q_id in answered_problem_ids
+                    or q_id in processing_problem_ids):
+                return
+            queried_problem_ids.add(q_id)
+        send_if_connected(ws, {
+            "op": "probleminfo",
+            "lessonid": lesson_id,
+            "problemid": q_id,
+            "msgid": 1,
+        })
+
+        def fallback():
+            # If the server never replies to probleminfo, answer immediately
+            # rather than dropping the question.
+            processor_stop.wait(90)
+            if stopped():
+                return
+            with problem_state_lock:
+                already = (q_id in answered_problem_ids or q_id in processing_problem_ids)
+            if not already:
+                print(f"[timer] probleminfo 未回复，题目 {q_id} 无延迟兜底作答", flush=True)
+                spawn_answer(q_id, None)
+
+        threading.Thread(target=fallback, daemon=True, name=f"probe-{q_id}").start()
 
     def stopped():
         return processor_stop.is_set() or (stop_event is not None and stop_event.is_set())
@@ -86,34 +173,11 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                 for q_id in time_lines:
                     if stopped():
                         return
-                    # 根据id进行检索已有的列表problem_list成员为dict,key["id"]为id
-                    problem = problem_list.get(q_id)
-                    if problem is not None:
-                        with problem_state_lock:
-                            should_answer = (q_id not in answered_problem_ids
-                                             and q_id not in processing_problem_ids)
-                            if should_answer:
-                                processing_problem_ids.add(q_id)
-                        if should_answer:
-                            try:
-                                answered = answer(
-                                    problem_id=q_id,
-                                    problem_type=problem["type"],
-                                    problem_content=problem["content"],
-                                    options=problem["options"],
-                                    jwt=ppt_jwt,
-                                    img_url=problem["img_url"],
-                                    course_name=problem["course_name"],
-                                )
-                                if answered:
-                                    with problem_state_lock:
-                                        answered_problem_ids.add(q_id)
-                            finally:
-                                with problem_state_lock:
-                                    processing_problem_ids.discard(q_id)
-                        # 移除回答完的问题
-                        if q_id in problem_list:
-                            del problem_list[q_id]
+                    # Poll replies carry IDs only — ask probleminfo for the
+                    # deadline, the answer thread is spawned from that reply
+                    # (with a no-delay fallback if the server stays silent).
+                    if q_id in problem_list:
+                        query_deadline(ws, q_id)
                 # 整批处理后只发一次查询，避免多题时请求成倍增长
                 if processor_stop.wait(sleep_second) or stopped():
                     return
@@ -122,6 +186,17 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                     "lessonid": str(lesson_id),
                     "msgid": 1
                 })
+        elif action == "probleminfo":
+            # Server reply to our deadline query: spawn the delayed answer.
+            q_id = msg_json.get("problemid")
+            if q_id is not None and q_id in problem_list:
+                deadline = deadline_from_limit(
+                    msg_json.get("limit"), msg_json.get("now"), msg_json.get("dt"))
+                target = submit_target(deadline)
+                if target is not None:
+                    print(f"[timer] 题目 {q_id} 将于 {target - time.time():.0f} 秒后提交"
+                          f"（截止前 {submit_before_deadline_seconds}s）", flush=True)
+                spawn_answer(q_id, target)
         elif action == "unlockproblem":
             # Teacher just pushed a problem (server push at publish time) —
             # answer immediately instead of waiting for the next poll cycle.
@@ -129,41 +204,26 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
             problem = msg_json.get("problem", {})
             q_id = problem.get("prob") or problem.get("problemid")
             if q_id is not None:
-                print(f"[push] 收到发题推送: {q_id}", flush=True)
-                with problem_state_lock:
-                    should_answer = (q_id not in answered_problem_ids
-                                     and q_id not in processing_problem_ids)
-                    if should_answer:
-                        processing_problem_ids.add(q_id)
-                if should_answer:
-                    try:
-                        cached = problem_list.get(q_id)
-                        if cached is not None:
-                            answered = answer(
-                                problem_id=q_id,
-                                problem_type=cached["type"],
-                                problem_content=cached["content"],
-                                options=cached["options"],
-                                jwt=ppt_jwt,
-                                img_url=cached["img_url"],
-                                course_name=course_name,
-                            )
-                            if answered:
-                                with problem_state_lock:
-                                    answered_problem_ids.add(q_id)
-                        else:
-                            # Not cached yet: sweep presentations again (the
-                            # new problem may live in an updated PPT), then
-                            # leave it to the poll loop to answer.
-                            print(f"[push] 题目 {q_id} 未缓存，重新拉取课件", flush=True)
-                            send_if_connected(ws, {
-                                "op": "fetchtimeline",
-                                "lessonid": str(lesson_id),
-                                "msgid": 1
-                            })
-                    finally:
-                        with problem_state_lock:
-                            processing_problem_ids.discard(q_id)
+                print(f"[push] 收到发题推送: {q_id} (limit={problem.get('limit')})", flush=True)
+                cached = problem_list.get(q_id)
+                if cached is not None:
+                    # Push messages carry the time limit themselves.
+                    deadline = deadline_from_limit(problem.get("limit"))
+                    target = submit_target(deadline)
+                    if target is not None:
+                        print(f"[timer] 将于 {target - time.time():.0f} 秒后提交"
+                              f"（截止前 {submit_before_deadline_seconds}s）", flush=True)
+                    spawn_answer(q_id, target)
+                else:
+                    # Not cached yet: sweep presentations again (the new
+                    # problem may live in an updated PPT); the deadline query
+                    # then happens through the poll path.
+                    print(f"[push] 题目 {q_id} 未缓存，重新拉取课件", flush=True)
+                    send_if_connected(ws, {
+                        "op": "fetchtimeline",
+                        "lessonid": str(lesson_id),
+                        "msgid": 1
+                    })
             # keep the poll loop alive
             send_if_connected(ws, {
                 "op": "fetchtimeline",
@@ -468,7 +528,15 @@ def format_result(problem_type, answer):
     return answer
 
 
-def answer(problem_id, problem_type, jwt, problem_content, options, img_url, course_name=None):
+def answer(problem_id, problem_type, jwt, problem_content, options, img_url, course_name=None,
+           delay_until_ts=None):
+    """Generate the answer first, then hold submission until delay_until_ts.
+
+    delay_until_ts is the target submit moment (epoch seconds), typically
+    deadline - SUBMIT_BEFORE_DEADLINE_SECONDS. AI generation happens
+    immediately so its latency does not eat into the hold window; the wait
+    happens here, inside the answering thread, never in the message loop.
+    """
     print(question_type[problem_type], problem_content, options, img_url)
 
     try:
@@ -498,6 +566,14 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
             answer_failed_notice(course_name, question_type[problem_type],
                                  problem_content, "AI 无法判断答案（非选择题，未提交）")
             return False
+
+    # Hold submission until (deadline - margin). The answer is already
+    # generated above, so this wait only pads the submit timestamp.
+    if delay_until_ts is not None:
+        wait = delay_until_ts - time.time()
+        if wait > 0:
+            print(f"[timer] 答案就绪，{wait:.0f} 秒后提交（截止前 {submit_before_deadline_seconds}s）", flush=True)
+            time.sleep(wait)
 
     post_json = {
         "problemId": problem_id,

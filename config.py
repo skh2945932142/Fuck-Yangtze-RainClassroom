@@ -106,6 +106,15 @@ def get_filtered_courses_from_env():
     return [s.strip() for s in raw.split(",") if s.strip()]
 
 
+# Blacklist: courses here are signed in but NEVER listened/answered
+# (takes precedence over FILTERED_COURSES whitelist).
+exclude_courses = [s.strip() for s in os.getenv("EXCLUDE_COURSES", "").split(",") if s.strip()]
+
+# Submit answers this many seconds before the question deadline (0 = submit
+# immediately once the answer is ready).
+submit_before_deadline_seconds = int(os.getenv("SUBMIT_BEFORE_DEADLINE_SECONDS", "15"))
+
+
 # 课程过滤：逗号分隔课程名，为空 = 监听全部课程
 if isLocal:
     _raw_courses = _read_ini_field(3)
