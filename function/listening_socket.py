@@ -11,6 +11,24 @@ from util.notice import answer_failed_notice
 from util.ai import request_ai
 from util.timestamp import get_date_time
 
+
+def _refresh_lesson_token(lesson_id):
+    """Re-checkin to obtain a fresh lesson token (community-verified recovery
+    for answer submissions rejected with token-expiry codes like 50004).
+    Returns the new Set-Auth JWT or None."""
+    try:
+        # Imported lazily: check_in imports this module at load time.
+        from function.check_in import check_in_on_listening
+        response = check_in_on_listening(lesson_id)
+        if response.status_code == 200:
+            jwt = response.headers.get("Set-Auth")
+            if jwt:
+                print("[token] 重新签到成功，已获取新 lesson token", flush=True)
+                return jwt
+    except Exception as error:
+        print(f"[token] 重新签到失败: {type(error).__name__}: {error!r}", flush=True)
+    return None
+
 def deadline_from_limit(limit, now=None, dt=None):
     """Convert a problem's `limit` (seconds, -1 = no limit; `now`/`dt` are
     server millisecond clocks from probleminfo replies) into an epoch
@@ -68,6 +86,9 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
     messages = queue.Queue()
     reported_errors = set()
     queried_problem_ids = set()  # probleminfo queries already sent
+    answer_attempts = {}  # q_id -> attempts made (retry cap per question)
+    token_box = {"jwt": ppt_jwt}  # live lesson JWT, refreshed from Set-Auth
+    MAX_ANSWER_ATTEMPTS = 3
 
     def spawn_answer(q_id, delay_until_ts):
         """Answer q_id in its own thread so the message loop never blocks.
@@ -80,6 +101,10 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
         with problem_state_lock:
             if q_id in answered_problem_ids or q_id in processing_problem_ids:
                 return False
+            attempts = answer_attempts.get(q_id, 0)
+            if attempts >= MAX_ANSWER_ATTEMPTS:
+                return False
+            answer_attempts[q_id] = attempts + 1
             processing_problem_ids.add(q_id)
 
         def run():
@@ -93,11 +118,23 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                     img_url=problem["img_url"],
                     course_name=problem["course_name"],
                     delay_until_ts=delay_until_ts,
+                    token_box=token_box,
+                    lesson_id=lesson_id,
                 )
                 if ok:
                     with problem_state_lock:
                         answered_problem_ids.add(q_id)
                         problem_list.pop(q_id, None)
+                else:
+                    # Submission rejected: allow the poll loop to re-query the
+                    # deadline and spawn a fresh attempt (community-verified
+                    # recovery: token may have been renewed by now, and the
+                    # question is usually still open until its deadline).
+                    with problem_state_lock:
+                        queried_problem_ids.discard(q_id)
+                    print(f"[retry] 题目 {q_id} 提交失败，稍后重试"
+                          f"（第 {answer_attempts.get(q_id, MAX_ANSWER_ATTEMPTS)}"
+                          f"/{MAX_ANSWER_ATTEMPTS} 次）", flush=True)
             finally:
                 with problem_state_lock:
                     processing_problem_ids.discard(q_id)
@@ -111,6 +148,9 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
         with problem_state_lock:
             if (q_id in queried_problem_ids or q_id in answered_problem_ids
                     or q_id in processing_problem_ids):
+                return
+            attempts = answer_attempts.get(q_id, 0)
+            if attempts >= MAX_ANSWER_ATTEMPTS:
                 return
             queried_problem_ids.add(q_id)
         send_if_connected(ws, {
@@ -128,6 +168,7 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                 return
             with problem_state_lock:
                 already = (q_id in answered_problem_ids or q_id in processing_problem_ids)
+                queried_problem_ids.discard(q_id)
             if not already:
                 print(f"[timer] probleminfo 未回复，题目 {q_id} 无延迟兜底作答", flush=True)
                 spawn_answer(q_id, None)
@@ -529,7 +570,7 @@ def format_result(problem_type, answer):
 
 
 def answer(problem_id, problem_type, jwt, problem_content, options, img_url, course_name=None,
-           delay_until_ts=None):
+           delay_until_ts=None, token_box=None, lesson_id=None):
     """Generate the answer first, then hold submission until delay_until_ts.
 
     delay_until_ts is the target submit moment (epoch seconds), typically
@@ -583,27 +624,58 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
     }
 
     # Same copy() rationale as above: mutating the global headers in place
-    # would corrupt requests from other lesson threads.
+    # would corrupt requests from other lesson threads. token_box holds the
+    # lesson's live JWT: the listener updates it whenever a response carries
+    # Set-Auth, so retries never reuse a stale token.
+    if token_box is not None and token_box.get("jwt"):
+        jwt = token_box["jwt"]
     new_headers = headers.copy()
     new_headers["Authorization"] = "Bearer " + jwt
     new_headers["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
                                  "Chrome/129.0.0.0 Safari/537.36 Edg/129.0.0.0")
 
-    response = requests.post(url=host + api["answer"], json=post_json, headers=new_headers)
+    response = requests.post(url=host + api["answer"], json=post_json, headers=new_headers, timeout=15)
 
-    if response.status_code == 200:
-        print("答题成功")
+    # Yuketang uses HTTP 200 + business code in the body (e.g. 50000
+    # UNAUTHENTICATED), so success must be judged by body code == 0, not the
+    # HTTP status. Each response may also carry a fresh Set-Auth token
+    # (rolling renewal) — pick it up so retries and later submissions of this
+    # lesson use a live token instead of the one from check-in time.
+    set_auth = response.headers.get("Set-Auth")
+    if set_auth and token_box is not None:
+        token_box["jwt"] = set_auth
+
+    body = None
+    try:
+        body = response.json()
+    except ValueError:
+        pass
+    # Some error paths return a bare JSON string instead of an object.
+    body_dict = body if isinstance(body, dict) else {}
+
+    code = body_dict.get("code")
+    if response.status_code == 200 and code == 0:
+        print("答题成功", flush=True)
         return True
+
+    # Token-expiry style rejections: the lesson token from check-in time has
+    # gone stale. Re-checkin for a fresh one so the retry (spawned by the poll
+    # loop after this failure) submits with a live token. Any code != 0 gets
+    # the same treatment — the re-checkin is cheap and harmless if the token
+    # was actually fine.
+    if code not in (None, 0) and token_box is not None and lesson_id is not None:
+        new_jwt = _refresh_lesson_token(lesson_id)
+        if new_jwt:
+            token_box["jwt"] = new_jwt
+
+    if body_dict:
+        msg = body_dict.get("msg", response.text[:200])
     else:
-        print("答题失败")
-        try:
-            msg = response.json().get("msg", response.text[:100])
-        except ValueError:
-            msg = response.text[:100]
-        if msg == "LESSON_END":
-            print("题目已经结束")
-        else:
-            print(msg, flush=True)
-        answer_failed_notice(course_name, question_type[problem_type],
-                             problem_content, f"提交被拒（HTTP {response.status_code}: {msg}）")
-        return False
+        msg = response.text[:200]
+    print(f"答题失败 HTTP {response.status_code} code={code} msg={msg}", flush=True)
+    print(f"提交的 payload: {json.dumps(post_json, ensure_ascii=False)[:300]}", flush=True)
+    if msg == "LESSON_END":
+        print("题目已经结束", flush=True)
+    answer_failed_notice(course_name, question_type[problem_type],
+                         problem_content, f"提交被拒（HTTP {response.status_code} code={code}: {msg}）")
+    return False

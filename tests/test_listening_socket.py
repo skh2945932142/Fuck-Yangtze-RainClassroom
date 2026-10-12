@@ -346,6 +346,194 @@ class ListeningSocketTests(unittest.TestCase):
         # deadline = now + 30s; submit target = deadline - 15s => ~now + 15s
         self.assertAlmostEqual(time.time() + 15, target, delta=2)
 
+    def test_failed_submission_is_retried_on_next_poll(self):
+        answer_calls = []
+        ws = FakeWebSocket()
+        results = [False, True]  # first submit rejected, retry accepted
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "q7",
+                     "problemType": 1, "body": "retry me", "options": [], "answers": []}}
+                ]}}
+
+        def fake_answer(**kwargs):
+            answer_calls.append(kwargs)
+            return results.pop(0) if results else True
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.answer = fake_answer
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            # Round 1: submit fails -> query marked stale for retry.
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["q7"]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "probleminfo", "problemid": "q7",
+                                       "limit": -1, "now": 0, "dt": 0}))
+            on_message.pending_messages.join()
+            for _ in range(100):
+                if len(answer_calls) >= 1:
+                    break
+                time.sleep(0.02)
+            # Let the round-1 answer thread fully exit so its processing flag
+            # is released before round 2 (avoids a benign race in the test).
+            time.sleep(0.1)
+            # Round 2: the poll must re-query the deadline (not skip q7),
+            # and the fresh reply spawns the retry that succeeds.
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["q7"]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "probleminfo", "problemid": "q7",
+                                       "limit": -1, "now": 0, "dt": 0}))
+            on_message.pending_messages.join()
+            for _ in range(100):
+                if len(answer_calls) >= 2:
+                    break
+                time.sleep(0.02)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+
+        self.assertEqual(2, len(answer_calls))
+        queries = [json.loads(p) for p in ws.sent if json.loads(p)["op"] == "probleminfo"]
+        self.assertEqual(2, len(queries))  # re-queried after the failure
+
+    def test_answer_retries_stop_after_max_attempts(self):
+        answer_calls = []
+        ws = FakeWebSocket()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "q8",
+                     "problemType": 1, "body": "hopeless", "options": [], "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), False)[1]
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            # Many poll rounds: attempts must cap at 3.
+            for _ in range(6):
+                on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["q8"]}))
+                on_message.pending_messages.join()
+                on_message(ws, json.dumps({"op": "probleminfo", "problemid": "q8",
+                                           "limit": -1, "now": 0, "dt": 0}))
+                on_message.pending_messages.join()
+                for _ in range(100):
+                    if len(answer_calls) > _:
+                        pass
+                    time.sleep(0.001)
+                time.sleep(0.05)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+
+        self.assertLessEqual(len(answer_calls), 3)
+
+    def test_answer_reads_set_auth_and_body_code(self):
+        # Success is judged by body code == 0; a fresh Set-Auth header must be
+        # picked up into the token box for subsequent submissions.
+        token_box = {"jwt": "old-jwt"}
+
+        class FakeResponse:
+            status_code = 200
+            headers = {"Set-Auth": "fresh-jwt"}
+            text = '{"code": 0, "msg": "OK"}'
+
+            def json(self):
+                return {"code": 0, "msg": "OK"}
+
+        original_post = listening_socket.requests.post
+        original_ai = listening_socket.request_ai
+        captured = {}
+
+        def fake_post(**kwargs):
+            captured["headers"] = kwargs["headers"]
+            return FakeResponse()
+
+        listening_socket.requests.post = fake_post
+        listening_socket.request_ai = lambda **_kwargs: ["A"]
+        try:
+            ok = listening_socket.answer(
+                problem_id="q1", problem_type=1, jwt="old-jwt",
+                problem_content="q", options=[{"key": "A", "value": "x"}],
+                img_url="", token_box=token_box, lesson_id="lesson",
+            )
+            # Second call must reuse the refreshed token from the token box.
+            ok2 = listening_socket.answer(
+                problem_id="q2", problem_type=1, jwt="old-jwt",
+                problem_content="q2", options=[{"key": "A", "value": "x"}],
+                img_url="", token_box=token_box, lesson_id="lesson",
+            )
+        finally:
+            listening_socket.requests.post = original_post
+            listening_socket.request_ai = original_ai
+
+        self.assertTrue(ok)
+        self.assertEqual("fresh-jwt", token_box["jwt"])
+        # Second call must reuse the refreshed token from the token box; the
+        # first call's header depended on the pre-test box state.
+        self.assertEqual("Bearer fresh-jwt", captured["headers"]["Authorization"])
+        self.assertTrue(ok2)
+
+    def test_answer_bare_string_json_response_is_handled(self):
+        # Regression: the server once returned a bare JSON string on reject,
+        # crashing the old error handler ('str' has no .get) and hiding the
+        # real reason.
+        token_box = {"jwt": "jwt"}
+
+        class FakeResponse:
+            status_code = 403
+            headers = {}
+            text = '"forbidden"'
+
+            def json(self):
+                return "forbidden"
+
+        original_post = listening_socket.requests.post
+        original_notice = listening_socket.answer_failed_notice
+        notices = []
+        listening_socket.requests.post = lambda **_kwargs: FakeResponse()
+        listening_socket.answer_failed_notice = lambda *a, **k: notices.append(a)
+        try:
+            ok = listening_socket.answer(
+                problem_id="q1", problem_type=1, jwt="jwt",
+                problem_content="q", options=[{"key": "A", "value": "x"}],
+                img_url="", token_box=token_box, lesson_id="lesson",
+            )
+        finally:
+            listening_socket.requests.post = original_post
+            listening_socket.answer_failed_notice = original_notice
+
+        self.assertFalse(ok)
+        self.assertEqual(1, len(notices))
+        self.assertIn("forbidden", notices[0][3])
+
     def test_notification_is_ignored_without_follow_up_send(self):
         ws = FakeWebSocket()
         on_message = listening_socket.on_message_connect(
