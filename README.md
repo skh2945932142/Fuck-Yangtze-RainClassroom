@@ -90,7 +90,7 @@
 |---|---|---|
 | `FILTERED_COURSES` | 空 | 需监听答题的课程名（白名单），英文逗号分隔；空 = 全部课程 |
 | `EXCLUDE_COURSES` | 空 | **排除**答题的课程名（黑名单，优先于白名单）：这些课只自动签到、不答题 |
-| `SUBMIT_BEFORE_DEADLINE_SECONDS` | `15` | 答案在题目截止前多少秒提交（0 = AI 生成完立即提交；答题时先取题目剩余时间） |
+| `SUBMIT_BEFORE_DEADLINE_SECONDS` | `30` | 答案在题目截止前多少秒提交；题目剩余时间不足该值时生成完立即提交（0 = 始终立即提交） |
 | `SCAN_INTERVAL_SECONDS` | `300` | 守护进程内部的课堂扫描间隔（秒）；与 GHA 部署的 cron 触发间隔是两回事 |
 | `EMAIL_USER` | 空 | 发件邮箱（如 QQ 邮箱） |
 | `EMAIL_PASS` | 空 | 邮箱授权码（QQ 邮箱需在设置中开启 SMTP 并生成授权码，**不是 QQ 密码**） |

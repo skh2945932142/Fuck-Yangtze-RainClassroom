@@ -43,10 +43,17 @@ def deadline_from_limit(limit, now=None, dt=None):
 
 
 def submit_target(deadline_ts):
-    """Target submit moment: deadline minus the hold margin."""
+    """Target submit moment: deadline minus the hold margin.
+
+    Questions with less than the margin remaining (publishes with a very
+    short limit, or answering late) submit immediately — the AI answer is
+    ready by then anyway, and holding would only risk missing the window."""
     if deadline_ts is None:
         return None
-    return deadline_ts - submit_before_deadline_seconds
+    target = deadline_ts - submit_before_deadline_seconds
+    if target < time.time():
+        return time.time()  # already inside the margin: submit asap
+    return target
 
 
 PING_INTERVAL_SECONDS = 30
@@ -247,8 +254,12 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                     msg_json.get("limit"), msg_json.get("now"), msg_json.get("dt"))
                 target = submit_target(deadline)
                 if target is not None:
-                    print(f"[timer] 题目 {q_id} 将于 {target - time.time():.0f} 秒后提交"
-                          f"（截止前 {submit_before_deadline_seconds}s）", flush=True)
+                    wait = target - time.time()
+                    if wait < 1:
+                        print(f"[timer] 题目 {q_id} 剩余时间不足 {submit_before_deadline_seconds}s，生成后立即提交", flush=True)
+                    else:
+                        print(f"[timer] 题目 {q_id} 将于 {wait:.0f} 秒后提交"
+                              f"（截止前 {submit_before_deadline_seconds}s）", flush=True)
                 spawn_answer(q_id, target)
         elif action == "unlockproblem":
             # Teacher just pushed a problem (server push at publish time) —
@@ -264,8 +275,12 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                     deadline = deadline_from_limit(problem.get("limit"))
                     target = submit_target(deadline)
                     if target is not None:
-                        print(f"[timer] 将于 {target - time.time():.0f} 秒后提交"
-                              f"（截止前 {submit_before_deadline_seconds}s）", flush=True)
+                        wait = target - time.time()
+                        if wait < 1:
+                            print(f"[timer] 剩余时间不足 {submit_before_deadline_seconds}s，生成后立即提交", flush=True)
+                        else:
+                            print(f"[timer] 将于 {wait:.0f} 秒后提交"
+                                  f"（截止前 {submit_before_deadline_seconds}s）", flush=True)
                     spawn_answer(q_id, target)
                 else:
                     # Not cached yet: sweep presentations again (the new

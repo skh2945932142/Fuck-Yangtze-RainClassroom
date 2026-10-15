@@ -342,9 +342,57 @@ class ListeningSocketTests(unittest.TestCase):
 
         self.assertEqual(1, len(answer_calls))
         target = answer_calls[0]["delay_until_ts"]
+        # limit 30s < margin 30s (default): submit immediately, not held
         self.assertIsNotNone(target)
-        # deadline = now + 30s; submit target = deadline - 15s => ~now + 15s
-        self.assertAlmostEqual(time.time() + 15, target, delta=2)
+        self.assertAlmostEqual(time.time(), target, delta=2)
+
+    def test_long_limit_still_holds_until_margin(self):
+        answer_calls = []
+        ws = FakeWebSocket()
+        now_ms = 2_000_000_000_000
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "q5b",
+                     "problemType": 4, "body": "fill me", "options": None, "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), True)[1]
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["q5b"]}))
+            on_message.pending_messages.join()
+            # server replies: 120 seconds left on the clock
+            on_message(ws, json.dumps({"op": "probleminfo", "problemid": "q5b",
+                                       "limit": 120, "now": now_ms, "dt": now_ms}))
+            on_message.pending_messages.join()
+            for _ in range(100):
+                if answer_calls:
+                    break
+                time.sleep(0.02)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+
+        self.assertEqual(1, len(answer_calls))
+        target = answer_calls[0]["delay_until_ts"]
+        self.assertIsNotNone(target)
+        # deadline = now + 120s; submit target = deadline - 30s => ~now + 90s
+        self.assertAlmostEqual(time.time() + 90, target, delta=3)
 
     def test_failed_submission_is_retried_on_next_poll(self):
         answer_calls = []
