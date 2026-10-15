@@ -530,9 +530,76 @@ class ListeningSocketTests(unittest.TestCase):
             listening_socket.requests.post = original_post
             listening_socket.answer_failed_notice = original_notice
 
+        # Transient rejection: returns False without mailing — the retry
+        # logic in spawn_answer mails only when attempts are exhausted.
         self.assertFalse(ok)
-        self.assertEqual(1, len(notices))
-        self.assertIn("forbidden", notices[0][3])
+        self.assertEqual(0, len(notices))
+
+    def test_answer_terminal_states_are_not_retried_or_mailed(self):
+        # 50028 ALREADY_ANSWERED means the question already has an answer
+        # (user manually answered): counted as success, no mail, no retry.
+        # 50026 LESSON_PROBLEM_FINISHED means the teacher closed the question:
+        # unrecoverable, notify once but mark the attempt loop terminal.
+        token_box = {"jwt": "jwt"}
+
+
+        class FakeResponseAlready:
+            status_code = 200
+            headers = {}
+            text = '{"code": 50028, "msg": "LESSON_PROBLEM_ALREADY_ANSWERED"}'
+
+            def json(self):
+                return {"code": 50028, "msg": "LESSON_PROBLEM_ALREADY_ANSWERED"}
+
+        class FakeResponseFinished:
+            status_code = 200
+            headers = {}
+            text = '{"code": 50026, "msg": "LESSON_PROBLEM_FINISHED"}'
+
+            def json(self):
+                return {"code": 50026, "msg": "LESSON_PROBLEM_FINISHED"}
+
+        original_post = listening_socket.requests.post
+        original_notice = listening_socket.answer_failed_notice
+        original_ai = listening_socket.request_ai
+        notices = []
+        listening_socket.requests.post = lambda **_kwargs: FakeResponseAlready()
+        listening_socket.answer_failed_notice = lambda *a, **k: notices.append(a)
+        listening_socket.request_ai = lambda **_kwargs: ["A"]
+        try:
+            ok_already = listening_socket.answer(
+                problem_id="q1", problem_type=1, jwt="jwt",
+                problem_content="q", options=[{"key": "A", "value": "x"}],
+                img_url="", token_box=token_box, lesson_id="lesson",
+            )
+        finally:
+            listening_socket.requests.post = original_post
+            listening_socket.answer_failed_notice = original_notice
+            listening_socket.request_ai = original_ai
+
+        self.assertIs(True, ok_already)  # duplicate answer counts as done
+        self.assertEqual(0, len(notices))
+
+        notices2 = []
+        listening_socket.requests.post = lambda **_kwargs: FakeResponseFinished()
+        listening_socket.answer_failed_notice = lambda *a, **k: notices2.append(a)
+        listening_socket.request_ai = lambda **_kwargs: ["A"]
+        original_notice2 = listening_socket.answer_failed_notice
+        try:
+            outcome = listening_socket.answer(
+                problem_id="q2", problem_type=1, jwt="jwt",
+                problem_content="q2", options=[{"key": "A", "value": "x"}],
+                img_url="", token_box=token_box, lesson_id="lesson",
+                course_name="毛概",
+            )
+        finally:
+            listening_socket.requests.post = original_post
+            listening_socket.answer_failed_notice = original_notice2
+            listening_socket.request_ai = original_ai
+
+        self.assertEqual("terminal", outcome)  # spawn_answer stops retrying
+        self.assertEqual(1, len(notices2))     # exactly one mail, no reprint
+        self.assertIn("结束", notices2[0][3])
 
     def test_notification_is_ignored_without_follow_up_send(self):
         ws = FakeWebSocket()

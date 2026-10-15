@@ -109,7 +109,7 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
 
         def run():
             try:
-                ok = answer(
+                outcome = answer(
                     problem_id=q_id,
                     problem_type=problem["type"],
                     problem_content=problem["content"],
@@ -121,20 +121,32 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                     token_box=token_box,
                     lesson_id=lesson_id,
                 )
-                if ok:
+                if outcome is True:
                     with problem_state_lock:
                         answered_problem_ids.add(q_id)
                         problem_list.pop(q_id, None)
-                else:
-                    # Submission rejected: allow the poll loop to re-query the
-                    # deadline and spawn a fresh attempt (community-verified
-                    # recovery: token may have been renewed by now, and the
-                    # question is usually still open until its deadline).
-                    with problem_state_lock:
-                        queried_problem_ids.discard(q_id)
-                    print(f"[retry] 题目 {q_id} 提交失败，稍后重试"
-                          f"（第 {answer_attempts.get(q_id, MAX_ANSWER_ATTEMPTS)}"
-                          f"/{MAX_ANSWER_ATTEMPTS} 次）", flush=True)
+                    return
+                if outcome == "terminal":
+                    # Question closed/answered server-side: no retry, no mail
+                    # (answer() already notified for the notify-worthy case).
+                    return
+                # Transient rejection: allow the poll loop to re-query the
+                # deadline and spawn a fresh attempt (community-verified
+                # recovery: token may have been renewed by now, and the
+                # question is usually still open until its deadline).
+                with problem_state_lock:
+                    queried_problem_ids.discard(q_id)
+                    attempts_used = answer_attempts.get(q_id, MAX_ANSWER_ATTEMPTS)
+                    last_attempt = attempts_used >= MAX_ANSWER_ATTEMPTS
+                print(f"[retry] 题目 {q_id} 提交失败，稍后重试"
+                      f"（第 {attempts_used}/{MAX_ANSWER_ATTEMPTS} 次）", flush=True)
+                if last_attempt:
+                    print(f"[retry] 题目 {q_id} 已达重试上限，放弃并发邮件提醒", flush=True)
+                    answer_failed_notice(
+                        problem.get("course_name") or course_name,
+                        question_type[problem.get("type")],
+                        problem.get("content"),
+                        f"自动作答连续 {MAX_ANSWER_ATTEMPTS} 次被拒（详见服务器日志），请手动处理")
             finally:
                 with problem_state_lock:
                     processing_problem_ids.discard(q_id)
@@ -658,6 +670,23 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
         print("答题成功", flush=True)
         return True
 
+    # Server-side per-question terminal states: retrying cannot help.
+    # 50028 = the question already has an answer recorded for this account
+    # (usually the user manually answered from phone/mini-program — the
+    # submission we tried would be a duplicate anyway); treat as done, notify
+    # nobody. 50026 = the teacher closed the question early ("结束作答");
+    # nothing can be submitted anymore, so give up quietly.
+    if code == 50028 or body_dict.get("msg") == "LESSON_PROBLEM_ALREADY_ANSWERED":
+        print("服务器已有该题答案（可能已手动作答），视为完成", flush=True)
+        return True
+    if code == 50026 or body_dict.get("msg") == "LESSON_PROBLEM_FINISHED":
+        print("老师已提前结束该题作答（50026），不再重试", flush=True)
+        if course_name:
+            answer_failed_notice(
+                course_name, question_type[problem_type], problem_content,
+                "老师提前结束了该题作答（未及提交）")
+        return "terminal"
+
     # Token-expiry style rejections: the lesson token from check-in time has
     # gone stale. Re-checkin for a fresh one so the retry (spawned by the poll
     # loop after this failure) submits with a live token. Any code != 0 gets
@@ -676,6 +705,7 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
     print(f"提交的 payload: {json.dumps(post_json, ensure_ascii=False)[:300]}", flush=True)
     if msg == "LESSON_END":
         print("题目已经结束", flush=True)
-    answer_failed_notice(course_name, question_type[problem_type],
-                         problem_content, f"提交被拒（HTTP {response.status_code} code={code}: {msg}）")
+    # The retry logic in spawn_answer sends the failure mail only when the
+    # question exhausts its attempts — keep this path mail-free so a
+    # transient rejection doesn't spam one email per attempt.
     return False
