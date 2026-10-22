@@ -58,6 +58,9 @@ def submit_target(deadline_ts):
 
 PING_INTERVAL_SECONDS = 30
 PING_TIMEOUT_SECONDS = 10
+# probleminfo replies can lag (~30s observed live on 2026-10-22); waiting the
+# old 90s before the fallback submit let the teacher close the question first.
+PROBLEMINFO_FALLBACK_SECONDS = 15
 RECONNECT_DELAY_SECONDS = 5
 
 
@@ -93,6 +96,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
     messages = queue.Queue()
     reported_errors = set()
     queried_problem_ids = set()  # probleminfo queries already sent
+    replied_problem_ids = set()  # probleminfo replies received (cancels fallback)
+    closed_problem_ids = set()  # server said FINISHED/ALREADY_ANSWERED: stop all work
     answer_attempts = {}  # q_id -> attempts made (retry cap per question)
     token_box = {"jwt": ppt_jwt}  # live lesson JWT, refreshed from Set-Auth
     MAX_ANSWER_ATTEMPTS = 3
@@ -136,6 +141,12 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                 if outcome == "terminal":
                     # Question closed/answered server-side: no retry, no mail
                     # (answer() already notified for the notify-worthy case).
+                    # Drop it from the cache so polls, deadline queries and
+                    # pending fallbacks stop touching it (live 10-22: it kept
+                    # re-answering and mailing after the teacher closed it).
+                    with problem_state_lock:
+                        closed_problem_ids.add(q_id)
+                        problem_list.pop(q_id, None)
                     return
                 # Transient rejection: allow the poll loop to re-query the
                 # deadline and spawn a fresh attempt (community-verified
@@ -166,7 +177,7 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
         Falls back to answering without delay if no reply arrives."""
         with problem_state_lock:
             if (q_id in queried_problem_ids or q_id in answered_problem_ids
-                    or q_id in processing_problem_ids):
+                    or q_id in processing_problem_ids or q_id in closed_problem_ids):
                 return
             attempts = answer_attempts.get(q_id, 0)
             if attempts >= MAX_ANSWER_ATTEMPTS:
@@ -181,15 +192,18 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
 
         def fallback():
             # If the server never replies to probleminfo, answer immediately
-            # rather than dropping the question.
-            processor_stop.wait(90)
+            # rather than dropping the question. The reply can take ~30s
+            # (observed live), so waiting longer than this risks the teacher
+            # closing the question first.
+            processor_stop.wait(PROBLEMINFO_FALLBACK_SECONDS)
             if stopped():
                 return
             with problem_state_lock:
-                already = (q_id in answered_problem_ids or q_id in processing_problem_ids)
+                already = (q_id in answered_problem_ids or q_id in processing_problem_ids
+                           or q_id in replied_problem_ids or q_id in closed_problem_ids)
                 queried_problem_ids.discard(q_id)
             if not already:
-                print(f"[timer] probleminfo 未回复，题目 {q_id} 无延迟兜底作答", flush=True)
+                print(f"[timer] probleminfo {PROBLEMINFO_FALLBACK_SECONDS}s 未回复，题目 {q_id} 无延迟兜底作答", flush=True)
                 spawn_answer(q_id, None)
 
         threading.Thread(target=fallback, daemon=True, name=f"probe-{q_id}").start()
@@ -208,8 +222,12 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
             time_lines = msg_json.get("unlockedproblem",[])
             # Polling observability: leave evidence of what the server sent so
             # live-class issues (empty unlock lists, unknown IDs) are diagnosable.
-            known = [q for q in time_lines if q in problem_list]
-            unknown = [q for q in time_lines if q not in problem_list]
+            known = [q for q in time_lines
+                     if q in problem_list or q in answered_problem_ids
+                     or q in closed_problem_ids]
+            unknown = [q for q in time_lines
+                       if q not in problem_list and q not in answered_problem_ids
+                       and q not in closed_problem_ids]
             if time_lines or problem_list:
                 print(f"[poll] unlocked={len(time_lines)} known={len(known)} "
                       f"unknown={len(unknown)} cached={len(problem_list)} "
@@ -250,6 +268,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
             # Server reply to our deadline query: spawn the delayed answer.
             q_id = msg_json.get("problemid")
             if q_id is not None and q_id in problem_list:
+                with problem_state_lock:
+                    replied_problem_ids.add(q_id)
                 deadline = deadline_from_limit(
                     msg_json.get("limit"), msg_json.get("now"), msg_json.get("dt"))
                 target = submit_target(deadline)

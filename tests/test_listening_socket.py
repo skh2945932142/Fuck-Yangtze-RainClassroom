@@ -716,6 +716,154 @@ class ListeningSocketTests(unittest.TestCase):
         self.assertEqual(10, apps[0].run_options["ping_timeout"])
         self.assertTrue(apps[1].closed)
 
+    def test_probleminfo_fallback_answers_after_short_wait(self):
+        # Live 2026-10-22: the reply lagged ~30s; the old 90s fallback made
+        # the submission land after the teacher closed the question.
+        answer_calls = []
+        ws = FakeWebSocket()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "qf",
+                     "problemType": 5, "body": "subjective", "options": None, "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        original_fallback = listening_socket.PROBLEMINFO_FALLBACK_SECONDS
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), True)[1]
+        listening_socket.PROBLEMINFO_FALLBACK_SECONDS = 0.05
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["qf"]}))
+            on_message.pending_messages.join()
+            # No probleminfo reply: the short fallback must answer anyway.
+            for _ in range(100):
+                if answer_calls:
+                    break
+                time.sleep(0.02)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+            listening_socket.PROBLEMINFO_FALLBACK_SECONDS = original_fallback
+
+        self.assertEqual(1, len(answer_calls))
+        self.assertIsNone(answer_calls[0]["delay_until_ts"])
+
+    def test_probleminfo_reply_cancels_fallback(self):
+        # A reply that arrives before the fallback deadline must cancel it,
+        # otherwise the question gets answered twice.
+        answer_calls = []
+        ws = FakeWebSocket()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "qg",
+                     "problemType": 1, "body": "choice", "options": [], "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        original_fallback = listening_socket.PROBLEMINFO_FALLBACK_SECONDS
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        # False keeps the question unanswered so a stale fallback would fire.
+        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), False)[1]
+        listening_socket.PROBLEMINFO_FALLBACK_SECONDS = 0.2
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["qg"]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "probleminfo", "problemid": "qg",
+                                       "limit": 60, "now": 0, "dt": 0}))
+            on_message.pending_messages.join()
+            for _ in range(100):
+                if answer_calls:
+                    break
+                time.sleep(0.02)
+            time.sleep(0.4)  # well past the 0.2s fallback window
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+            listening_socket.PROBLEMINFO_FALLBACK_SECONDS = original_fallback
+
+        self.assertEqual(1, len(answer_calls))
+
+    def test_terminal_question_is_dropped_and_not_requeried(self):
+        answer_calls = []
+        ws = FakeWebSocket()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "qh",
+                     "problemType": 5, "body": "closed", "options": None, "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_answer = listening_socket.answer
+        original_fallback = listening_socket.PROBLEMINFO_FALLBACK_SECONDS
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.answer = lambda **kwargs: (answer_calls.append(kwargs), "terminal")[1]
+        listening_socket.PROBLEMINFO_FALLBACK_SECONDS = 0.05
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["qh"]}))
+            on_message.pending_messages.join()
+            on_message(ws, json.dumps({"op": "probleminfo", "problemid": "qh",
+                                       "limit": 60, "now": 0, "dt": 0}))
+            on_message.pending_messages.join()
+            for _ in range(100):
+                if answer_calls:
+                    break
+                time.sleep(0.02)
+            time.sleep(0.2)
+            # Another poll arrives: the closed question must not be queried
+            # or answered again.
+            on_message(ws, json.dumps({"op": "fetchtimeline", "unlockedproblem": ["qh"]}))
+            on_message.pending_messages.join()
+            time.sleep(0.2)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.answer = original_answer
+            listening_socket.PROBLEMINFO_FALLBACK_SECONDS = original_fallback
+
+        self.assertEqual(1, len(answer_calls))
+        queries = [p for p in ws.sent if json.loads(p)["op"] == "probleminfo"]
+        self.assertEqual(1, len(queries))
+
 
 if __name__ == "__main__":
     unittest.main()
