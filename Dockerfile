@@ -11,13 +11,14 @@ RUN set -eux; \
         sed -i "s|deb.debian.org|mirrors.cloud.aliyuncs.com|g; s|security.debian.org|mirrors.cloud.aliyuncs.com|g" \
             /etc/apt/sources.list.d/debian.sources; \
     fi; \
-    if ! apt-get update; then \
+    if ! (apt-get update && apt-get install -y --no-install-recommends \
+            libgl1 libglib2.0-0 libgomp1); then \
         if [ -f /tmp/debian.sources.bak ]; then \
             cp /tmp/debian.sources.bak /etc/apt/sources.list.d/debian.sources; \
         fi; \
         apt-get update; \
+        apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1; \
     fi; \
-    apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1; \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
