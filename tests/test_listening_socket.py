@@ -864,6 +864,73 @@ class ListeningSocketTests(unittest.TestCase):
         queries = [p for p in ws.sent if json.loads(p)["op"] == "probleminfo"]
         self.assertEqual(1, len(queries))
 
+    def test_cached_problem_is_pregenerated(self):
+        # Answers for PPT-cached problems are generated before publish time,
+        # so a slow thinking model cannot miss the submission window.
+        ai_calls = []
+        ws = FakeWebSocket()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "qp",
+                     "problemType": 2, "body": "pregenerated question",
+                     "options": [{"key": "A", "value": "x"}], "answers": []}}
+                ]}}
+
+        original_get = listening_socket.requests.get
+        original_ai = listening_socket.request_ai
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.request_ai = lambda **kwargs: (ai_calls.append(kwargs), ["A"])[1]
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            for _ in range(100):
+                if ai_calls:
+                    break
+                time.sleep(0.02)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.request_ai = original_ai
+
+        self.assertEqual(1, len(ai_calls))
+        self.assertEqual("pregenerated question", ai_calls[0]["problem"])
+
+    def test_answer_uses_precomputed_without_calling_ai(self):
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+            text = '{"code": 0, "msg": "OK"}'
+
+            def json(self):
+                return {"code": 0, "msg": "OK"}
+
+        original_post = listening_socket.requests.post
+        original_ai = listening_socket.request_ai
+        listening_socket.requests.post = lambda **_kwargs: FakeResponse()
+        listening_socket.request_ai = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("AI must not be called"))
+        try:
+            ok = listening_socket.answer(
+                problem_id="q1", problem_type=2, jwt="jwt",
+                problem_content="q", options=[{"key": "A", "value": "x"}],
+                img_url="", token_box={"jwt": "jwt"}, lesson_id="lesson",
+                precomputed=["A"],
+            )
+        finally:
+            listening_socket.requests.post = original_post
+            listening_socket.request_ai = original_ai
+
+        self.assertTrue(ok)
+
 
 if __name__ == "__main__":
     unittest.main()

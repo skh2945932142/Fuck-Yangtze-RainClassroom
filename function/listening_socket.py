@@ -1,3 +1,4 @@
+import os
 import queue
 import random
 import threading
@@ -101,6 +102,43 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
     answer_attempts = {}  # q_id -> attempts made (retry cap per question)
     token_box = {"jwt": ppt_jwt}  # live lesson JWT, refreshed from Set-Auth
     MAX_ANSWER_ATTEMPTS = 3
+    # Pre-generated answers: the listener caches every problem from the PPT
+    # before the teacher publishes it, so the answer can be computed during
+    # idle time. Live 2026-10-29: the thinking model took 67s on a 60s
+    # question, so generating only at publish time loses the race.
+    answer_cache = {}
+    pregen_sem = threading.Semaphore(int(os.getenv("PREGEN_CONCURRENCY", "2")))
+    pregenerate_enabled = os.getenv("PREGENERATE_ANSWERS", "1") != "0"
+
+    def pregenerate(q_id):
+        """Compute a question's answer ahead of publish time."""
+        if not pregenerate_enabled:
+            return
+        with pregen_sem:
+            if stopped() or q_id in answered_problem_ids or q_id in closed_problem_ids:
+                return
+            with problem_state_lock:
+                problem = problem_list.get(q_id)
+                if problem is None or q_id in answer_cache:
+                    return
+            try:
+                answer_list = request_ai(
+                    type=question_type[problem["type"]],
+                    problem=problem["content"],
+                    options=problem["options"],
+                    img_url=problem["img_url"],
+                )
+            except Exception as error:
+                print(f"[pregen] 题目 {q_id} 预生成失败: {type(error).__name__}: {error!r}", flush=True)
+                return
+            if answer_list and not stopped():
+                with problem_state_lock:
+                    answer_cache[q_id] = answer_list
+                print(f"[pregen] 题目 {q_id} 答案已预生成", flush=True)
+
+    def schedule_pregeneration(q_id):
+        threading.Thread(target=pregenerate, args=(q_id,), daemon=True,
+                         name=f"pregen-{q_id}").start()
 
     def spawn_answer(q_id, delay_until_ts):
         """Answer q_id in its own thread so the message loop never blocks.
@@ -119,6 +157,9 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
             answer_attempts[q_id] = attempts + 1
             processing_problem_ids.add(q_id)
 
+        with problem_state_lock:
+            precomputed = answer_cache.pop(q_id, None)
+
         def run():
             try:
                 outcome = answer(
@@ -132,6 +173,7 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                     delay_until_ts=delay_until_ts,
                     token_box=token_box,
                     lesson_id=lesson_id,
+                    precomputed=precomputed,
                 )
                 if outcome is True:
                     with problem_state_lock:
@@ -395,6 +437,7 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                                         seen_problem_ids.add(question["problemId"])
                                         new_problem_count += 1
                                 problem_list[question["problemId"]] = save_dict
+                                schedule_pregeneration(question["problemId"])
                 else:
                     print(f"获取 PPT 失败，HTTP {response.status_code}", flush=True)
             # 开始监听 定时发送
@@ -617,7 +660,7 @@ def format_result(problem_type, answer):
 
 
 def answer(problem_id, problem_type, jwt, problem_content, options, img_url, course_name=None,
-           delay_until_ts=None, token_box=None, lesson_id=None):
+           delay_until_ts=None, token_box=None, lesson_id=None, precomputed=None):
     """Generate the answer first, then hold submission until delay_until_ts.
 
     delay_until_ts is the target submit moment (epoch seconds), typically
@@ -627,13 +670,24 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
     """
     print(question_type[problem_type], problem_content, options, img_url)
 
-    try:
-        raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)
-    except Exception as error:
-        print(f"AI 调用异常: {type(error).__name__}: {error!r}", flush=True)
-        answer_failed_notice(course_name, question_type[problem_type],
-                             problem_content, f"AI 调用异常（{type(error).__name__}）")
-        return False
+    if precomputed:
+        # Generated while the question was still cached in the PPT — no AI
+        # latency at publish time. A ready answer is submitted right away
+        # (small jitter) instead of holding until deadline-margin: the
+        # teacher may close the question early (50026), and once closed the
+        # server rejects every later submission.
+        print("[pregen] 使用预生成答案，立即提交", flush=True)
+        raw_answer = list(precomputed)
+        if os.getenv("PREGEN_SUBMIT_IMMEDIATELY", "1") != "0":
+            delay_until_ts = time.time() + random.uniform(0.5, 2.0)
+    else:
+        try:
+            raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)
+        except Exception as error:
+            print(f"AI 调用异常: {type(error).__name__}: {error!r}", flush=True)
+            answer_failed_notice(course_name, question_type[problem_type],
+                                 problem_content, f"AI 调用异常（{type(error).__name__}）")
+            return False
 
     # LLM could not determine the answer (returned empty list): submitting a
     # blank is worse than not submitting — it records an instant blank answer

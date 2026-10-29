@@ -62,9 +62,13 @@ _vision_supported = None
 def LLM_init(api_key: str):
     global client
     if client is None:
+        # A hung provider request must not block the answer thread past the
+        # question deadline: the SDK default is 600s. Keep one attempt.
         client = OpenAI(
             api_key=api_key,
             base_url=ai_base_url,
+            timeout=float(os.getenv("AI_TIMEOUT_SECONDS", "90")),
+            max_retries=int(os.getenv("AI_MAX_RETRIES", "0")),
         )
     return client
 
