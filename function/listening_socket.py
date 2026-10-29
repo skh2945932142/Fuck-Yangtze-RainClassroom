@@ -121,16 +121,21 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                 problem = problem_list.get(q_id)
                 if problem is None or q_id in answer_cache:
                     return
-            try:
-                answer_list = request_ai(
-                    type=question_type[problem["type"]],
-                    problem=problem["content"],
-                    options=problem["options"],
-                    img_url=problem["img_url"],
-                )
-            except Exception as error:
-                print(f"[pregen] 题目 {q_id} 预生成失败: {type(error).__name__}: {error!r}", flush=True)
-                return
+            answer_list = None
+            for attempt in (1, 2):
+                try:
+                    answer_list = request_ai(
+                        type=question_type[problem["type"]],
+                        problem=problem["content"],
+                        options=problem["options"],
+                        img_url=problem["img_url"],
+                    )
+                    break
+                except Exception as error:
+                    print(f"[pregen] 题目 {q_id} 预生成失败（第 {attempt}/2 次）: "
+                          f"{type(error).__name__}: {error!r}", flush=True)
+                    if attempt == 1 and not stopped():
+                        processor_stop.wait(2)
             if answer_list and not stopped():
                 with problem_state_lock:
                     answer_cache[q_id] = answer_list
@@ -676,10 +681,20 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
         # (small jitter) instead of holding until deadline-margin: the
         # teacher may close the question early (50026), and once closed the
         # server rejects every later submission.
-        print("[pregen] 使用预生成答案，立即提交", flush=True)
+        print("[pregen] 使用预生成答案", flush=True)
         raw_answer = list(precomputed)
-        if os.getenv("PREGEN_SUBMIT_IMMEDIATELY", "1") != "0":
-            delay_until_ts = time.time() + random.uniform(0.5, 2.0)
+        if problem_type in (1, 2, 3):
+            # Choice questions: wait a little after publish (default ~10s)
+            # instead of submitting instantly — still well before any early
+            # closure, but not suspiciously immediate. Never wait past the
+            # original submit target when the question is about to close.
+            choice_delay = float(os.getenv("PREGEN_CHOICE_DELAY_SECONDS", "10"))
+            target = time.time() + choice_delay + random.uniform(-1.0, 1.0)
+            target = max(target, time.time() + 0.5)
+            if delay_until_ts is not None:
+                target = min(target, max(delay_until_ts, time.time() + 0.5))
+            delay_until_ts = target
+            print(f"[timer] 选择题预生成答案，将在 {delay_until_ts - time.time():.0f} 秒后提交", flush=True)
     else:
         try:
             raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)

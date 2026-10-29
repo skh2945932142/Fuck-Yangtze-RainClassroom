@@ -92,7 +92,7 @@
 | `EXCLUDE_COURSES` | 空 | **排除**答题的课程名（黑名单，优先于白名单）：这些课只自动签到、不答题 |
 | `SUBMIT_BEFORE_DEADLINE_SECONDS` | `30` | 答案在题目截止前多少秒提交；题目剩余时间不足该值时生成完立即提交（0 = 始终立即提交） |
 | `PREGENERATE_ANSWERS` | `1` | 开课缓存 PPT 时提前用大模型生成各题答案，发题时直接用缓存（0 = 关闭） |
-| `PREGEN_SUBMIT_IMMEDIATELY` | `1` | 有预生成答案时立即提交，不等到截止前 30s（防止老师提前收卷；0 = 仍按压线策略） |
+| `PREGEN_CHOICE_DELAY_SECONDS` | `10` | 有预生成答案的选择题在发布后约多少秒提交（防收卷且不显得秒答）；非选择题仍按截止前策略 |
 | `AI_TIMEOUT_SECONDS` | `90` | 单次大模型请求超时，超时不会无限阻塞提交 |
 | `SCAN_INTERVAL_SECONDS` | `300` | 守护进程内部的课堂扫描间隔（秒）；与 GHA 部署的 cron 触发间隔是两回事 |
 | `EMAIL_USER` | 空 | 发件邮箱（如 QQ 邮箱） |

@@ -905,6 +905,50 @@ class ListeningSocketTests(unittest.TestCase):
         self.assertEqual(1, len(ai_calls))
         self.assertEqual("pregenerated question", ai_calls[0]["problem"])
 
+    def test_pregeneration_retries_once_on_failure(self):
+        ai_calls = []
+        ws = FakeWebSocket()
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"data": {"slides": [
+                    {"coverAlt": "", "problem": {"problemId": "qr",
+                     "problemType": 1, "body": "retry pregen",
+                     "options": [{"key": "A", "value": "x"}], "answers": []}}
+                ]}}
+
+        def flaky_ai(**kwargs):
+            ai_calls.append(kwargs)
+            if len(ai_calls) == 1:
+                raise RuntimeError("transient")
+            return ["A"]
+
+        original_get = listening_socket.requests.get
+        original_ai = listening_socket.request_ai
+        listening_socket.requests.get = lambda **_kwargs: FakeResponse()
+        listening_socket.request_ai = flaky_ai
+        on_message = listening_socket.on_message_connect(
+            ppt_jwt="ppt", lesson_id="lesson", identity_id="user",
+            socket_jwt="socket", sleep_second=0,
+        )
+        try:
+            on_message(ws, json.dumps({"op": "hello", "timeline": [
+                {"type": "slide", "pres": "p1"}]}))
+            on_message.pending_messages.join()
+            for _ in range(200):
+                if len(ai_calls) >= 2:
+                    break
+                time.sleep(0.02)
+        finally:
+            on_message.stop_processing()
+            on_message.pending_messages.join()
+            listening_socket.requests.get = original_get
+            listening_socket.request_ai = original_ai
+
+        self.assertEqual(2, len(ai_calls))
+
     def test_answer_uses_precomputed_without_calling_ai(self):
         class FakeResponse:
             status_code = 200
@@ -916,6 +960,8 @@ class ListeningSocketTests(unittest.TestCase):
 
         original_post = listening_socket.requests.post
         original_ai = listening_socket.request_ai
+        original_delay = os.environ.get("PREGEN_CHOICE_DELAY_SECONDS")
+        os.environ["PREGEN_CHOICE_DELAY_SECONDS"] = "0"
         listening_socket.requests.post = lambda **_kwargs: FakeResponse()
         listening_socket.request_ai = lambda **_kwargs: (_ for _ in ()).throw(AssertionError("AI must not be called"))
         try:
@@ -928,6 +974,10 @@ class ListeningSocketTests(unittest.TestCase):
         finally:
             listening_socket.requests.post = original_post
             listening_socket.request_ai = original_ai
+            if original_delay is None:
+                os.environ.pop("PREGEN_CHOICE_DELAY_SECONDS", None)
+            else:
+                os.environ["PREGEN_CHOICE_DELAY_SECONDS"] = original_delay
 
         self.assertTrue(ok)
 
