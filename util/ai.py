@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import re
 
 import requests
 from openai import OpenAI
@@ -151,6 +152,39 @@ def _option_text(option):
     return str(getattr(option, "value", None) or "")
 
 
+def _parse_answer_json(response):
+    """Parse the model reply, tolerating ```json fences and stray prose.
+
+    Live 2026-10-29: some replies were wrapped in a markdown fence, which
+    made json.loads raise JSONDecodeError and dropped the question.
+    """
+    if not response:
+        return []
+    text = str(response).strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```\s*$", "", text)
+    data = None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        match = re.search(r"\{.*\}", text, re.S)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except ValueError:
+                data = None
+    if isinstance(data, dict):
+        answer = data.get("answer", [])
+    elif isinstance(data, list):
+        answer = data
+    else:
+        answer = []
+    if not isinstance(answer, list):
+        answer = [answer]
+    return [str(item) for item in answer]
+
+
 def request_ai(type, problem, options, img_url):
     problem_text = problem
     image_data_uri = None
@@ -193,10 +227,7 @@ def request_ai(type, problem, options, img_url):
 
     response = get_ans(str(send), image_data_uri=image_data_uri)
     print(response)
-    answer = json.loads(response).get("answer", [])
-    if not isinstance(answer, list):
-        answer = [answer]
-    answer = [str(item) for item in answer]
+    answer = _parse_answer_json(response)
 
     # Safety net for subjective/fill-blank answers: the prompt already asks
     # for a concise answer; this only kicks in on runaway output (200+ chars)
