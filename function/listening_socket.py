@@ -57,6 +57,26 @@ def submit_target(deadline_ts):
     return target
 
 
+def early_submit_delay(problem_type):
+    """Seconds after publish to submit a ready answer, or None to fall back to
+    the deadline-margin hold.
+
+    The server closes a question the moment the teacher clicks "结束作答"
+    (LESSON_PROBLEM_FINISHED / code 50026) and rejects every submission after
+    that — a ready answer held until deadline-margin therefore loses the race
+    whenever the teacher does not run the clock out. Subjective questions are
+    the worst case: teachers read a few replies and close early, so holding
+    them until deadline-margin fails on essentially every question.
+
+    Both choice (1/2/3) and text (4/5) answers submit early; choice answers
+    wait a little longer so they do not look like an instant reply."""
+    if problem_type in (1, 2, 3):
+        return float(os.getenv("PREGEN_CHOICE_DELAY_SECONDS", "10"))
+    if problem_type in (4, 5):
+        return float(os.getenv("TEXT_SUBMIT_DELAY_SECONDS", "8"))
+    return None
+
+
 PING_INTERVAL_SECONDS = 30
 PING_TIMEOUT_SECONDS = 10
 # probleminfo replies can lag (~30s observed live on 2026-10-22); waiting the
@@ -683,18 +703,16 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
         # server rejects every later submission.
         print("[pregen] 使用预生成答案", flush=True)
         raw_answer = list(precomputed)
-        if problem_type in (1, 2, 3):
-            # Choice questions: wait a little after publish (default ~10s)
-            # instead of submitting instantly — still well before any early
-            # closure, but not suspiciously immediate. Never wait past the
-            # original submit target when the question is about to close.
-            choice_delay = float(os.getenv("PREGEN_CHOICE_DELAY_SECONDS", "10"))
-            target = time.time() + choice_delay + random.uniform(-1.0, 1.0)
+        early_delay = early_submit_delay(problem_type)
+        if early_delay is not None:
+            # Never wait past the original submit target when the question is
+            # already about to close.
+            target = time.time() + early_delay + random.uniform(-1.0, 1.0)
             target = max(target, time.time() + 0.5)
             if delay_until_ts is not None:
                 target = min(target, max(delay_until_ts, time.time() + 0.5))
             delay_until_ts = target
-            print(f"[timer] 选择题预生成答案，将在 {delay_until_ts - time.time():.0f} 秒后提交", flush=True)
+            print(f"[timer] 预生成答案，将在 {delay_until_ts - time.time():.0f} 秒后提交", flush=True)
     else:
         try:
             raw_answer = request_ai(type=question_type[problem_type], problem=problem_content, options=options, img_url=img_url)
@@ -703,6 +721,14 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
             answer_failed_notice(course_name, question_type[problem_type],
                                  problem_content, f"AI 调用异常（{type(error).__name__}）")
             return False
+        # Answer generated live: the deadline-margin hold would apply from
+        # here on, which is the same 50026 race as above (worse — the model
+        # already burned part of the window). Submit early as well.
+        early_delay = early_submit_delay(problem_type)
+        if early_delay is not None:
+            early = time.time() + early_delay
+            if delay_until_ts is None or early < delay_until_ts:
+                delay_until_ts = early
 
     # LLM could not determine the answer (returned empty list): submitting a
     # blank is worse than not submitting — it records an instant blank answer

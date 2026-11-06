@@ -982,5 +982,73 @@ class ListeningSocketTests(unittest.TestCase):
         self.assertTrue(ok)
 
 
+    def _run_answer_with_far_deadline(self, problem_type, **overrides):
+        """Call answer() with a deadline 600s away and report how long it took
+        before actually submitting. A ready answer must not be held that long:
+        the teacher can close the question first (50026)."""
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+            text = '{"code": 0, "msg": "OK"}'
+
+            def json(self):
+                return {"code": 0, "msg": "OK"}
+
+        original_post = listening_socket.requests.post
+        saved_env = {name: os.environ.get(name)
+                     for name in ("TEXT_SUBMIT_DELAY_SECONDS", "PREGEN_CHOICE_DELAY_SECONDS")}
+        os.environ["TEXT_SUBMIT_DELAY_SECONDS"] = "0"
+        os.environ["PREGEN_CHOICE_DELAY_SECONDS"] = "0"
+        listening_socket.requests.post = lambda **_kwargs: FakeResponse()
+        kwargs = {
+            "problem_id": f"q-{problem_type}", "problem_type": problem_type,
+            "jwt": "jwt", "problem_content": "q", "options": None, "img_url": "",
+            "token_box": {"jwt": "jwt"}, "lesson_id": "lesson",
+            "delay_until_ts": time.time() + 600,
+        }
+        kwargs.update(overrides)
+        started = time.time()
+        try:
+            ok = listening_socket.answer(**kwargs)
+        finally:
+            elapsed = time.time() - started
+            listening_socket.requests.post = original_post
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+        return ok, elapsed
+
+    def test_subjective_answer_uses_precomputed_without_holding_to_margin(self):
+        """A pre-generated subjective answer must go out seconds after publish.
+        Holding it until deadline-margin loses every question the teacher
+        closes early with LESSON_PROBLEM_FINISHED (50026)."""
+        ok, elapsed = self._run_answer_with_far_deadline(5, precomputed=["这是一个答案"])
+        self.assertTrue(ok)
+        self.assertLess(elapsed, 5)
+
+    def test_live_generated_subjective_answer_does_not_hold_to_margin(self):
+        """Same race when the answer is generated live at publish time."""
+        original_ai = listening_socket.request_ai
+        listening_socket.request_ai = lambda **_kwargs: ["实时生成的答案"]
+        try:
+            ok, elapsed = self._run_answer_with_far_deadline(5)
+        finally:
+            listening_socket.request_ai = original_ai
+        self.assertTrue(ok)
+        self.assertLess(elapsed, 5)
+
+    def test_live_generated_fill_blank_answer_does_not_hold_to_margin(self):
+        original_ai = listening_socket.request_ai
+        listening_socket.request_ai = lambda **_kwargs: ["42"]
+        try:
+            ok, elapsed = self._run_answer_with_far_deadline(4)
+        finally:
+            listening_socket.request_ai = original_ai
+        self.assertTrue(ok)
+        self.assertLess(elapsed, 5)
+
+
 if __name__ == "__main__":
     unittest.main()

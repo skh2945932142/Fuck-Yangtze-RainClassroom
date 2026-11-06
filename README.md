@@ -21,7 +21,7 @@
 | 🔍 常驻扫描 | 每 5 分钟检查一次是否有正在进行的课堂（间隔可调） |
 | ✅ 自动签到 | 发现课堂立即签到，扫描循环重启后幂等不重复 |
 | 📡 题目监听 | 开课时预缓存全部 PPT 中的**随堂题**，WebSocket 轮询感知老师发题（约 10 秒内）；⚠️ 仅限随堂题，课后作业/考试不支持（见 FAQ） |
-| 🤖 AI 作答 | 接入任意 OpenAI 兼容 API；文本题直接作答；默认在题目截止前 15 秒提交（可调） |
+| 🤖 AI 作答 | 接入任意 OpenAI 兼容 API；文本题直接作答；答案就绪后**立即提交**（默认发布后约 8 秒，可调），不再压到截止前，避免老师提前「结束作答」后提交被拒 |
 | 👁️ 多模态视觉答题 | 图片题（电路图/图表等）把 slide 截图直接发给视觉模型读图作答；视觉不可用自动降级 PaddleOCR 文字识别 |
 | 📝 按题型提交 | 单选/多选/投票/填空/主观题各自正确的 payload 格式（修复了上游填空/主观题提交必失败的问题） |
 | 🎲 兜底策略 | AI 答不出时：选择题随机作答，文字题放弃提交（不留空白记录） |
@@ -92,7 +92,8 @@
 | `EXCLUDE_COURSES` | 空 | **排除**答题的课程名（黑名单，优先于白名单）：这些课只自动签到、不答题 |
 | `SUBMIT_BEFORE_DEADLINE_SECONDS` | `30` | 答案在题目截止前多少秒提交；题目剩余时间不足该值时生成完立即提交（0 = 始终立即提交） |
 | `PREGENERATE_ANSWERS` | `1` | 开课缓存 PPT 时提前用大模型生成各题答案，发题时直接用缓存（0 = 关闭） |
-| `PREGEN_CHOICE_DELAY_SECONDS` | `10` | 有预生成答案的选择题在发布后约多少秒提交（防收卷且不显得秒答）；非选择题仍按截止前策略 |
+| `PREGEN_CHOICE_DELAY_SECONDS` | `10` | 选择题答案就绪后约多少秒提交（防收卷且不显得秒答） |
+| `TEXT_SUBMIT_DELAY_SECONDS` | `8` | 填空题 / 主观题答案就绪后约多少秒提交。**不要调大**：老师常在题目限时结束前就点「结束作答」（服务端 `50026 LESSON_PROBLEM_FINISHED`），一旦关闭，之后所有提交都会被拒 |
 | `AI_TIMEOUT_SECONDS` | `90` | 单次大模型请求超时，超时不会无限阻塞提交 |
 | `SCAN_INTERVAL_SECONDS` | `300` | 守护进程内部的课堂扫描间隔（秒）；与 GHA 部署的 cron 触发间隔是两回事 |
 | `EMAIL_USER` | 空 | 发件邮箱（如 QQ 邮箱） |
@@ -152,14 +153,14 @@ zeabur service restart --id <服务ID> --env-id <环境ID> -i=false
 2. 仓库 **Settings → Secrets and variables → Actions** 添加 Secrets：
    - `SESSION`（必填）、`AI_KEY`（必填）
    - 可选：`AI_BASE_URL`、`AI_MODEL`、`ENNCY_KEY`、`FILTERED_COURSES`、`EXCLUDE_COURSES`、`EMAIL_USER`、`EMAIL_PASS`、`TO_EMAIL`
-   - 可选 Variables（Variables 标签页）：`SUBMIT_BEFORE_DEADLINE_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS`
+   - 可选 Variables（Variables 标签页）：`SUBMIT_BEFORE_DEADLINE_SECONDS`、`TEXT_SUBMIT_DELAY_SECONDS`、`PREGEN_CHOICE_DELAY_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS`
 3. **Actions** 页启用 `Rain classroom auto answer (scheduled)` workflow
 
 行为说明：
 
 - cron 按学校上课时段（北京时间周一至五 7:00–20:00）**每 20 分钟**触发一次
 - `start.py` 是常驻进程，workflow 设了 **50 分钟超时**：单次 run 覆盖一个课时段的前 ~45 分钟，到点退出后由下一次 cron 接力（课堂中段的题目靠已建立的 WebSocket 监听，不依赖新 run）
-- `SUBMIT_BEFORE_DEADLINE_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS` 读取仓库 **Variables**（Settings → Secrets and variables → Actions → Variables 标签页），其余配置读取 **Secrets**——两者位置不同，配错会读到空值（不配则用代码默认值：压线 30s、主观题 30 字、视觉 auto、扫描间隔 300s）
+- `SUBMIT_BEFORE_DEADLINE_SECONDS`、`TEXT_SUBMIT_DELAY_SECONDS`、`PREGEN_CHOICE_DELAY_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS` 读取仓库 **Variables**（Settings → Secrets and variables → Actions → Variables 标签页），其余配置读取 **Secrets**——两者位置不同，配错会读到空值（不配则用代码默认值：压线 30s、主观题 30 字、视觉 auto、扫描间隔 300s）
 - **分钟数**：公开仓库（本项目的任何 fork）使用标准 runner 完全免费且不限量；私有克隆受 2000 分钟/月免费额度限制，本模式上课日全天约 13 小时 runner 时间会迅速超限——私有部署请选方式 A/C/D。监听/答题不产生额外分钟消耗（每个 run 固定跑满 50 分钟超时，与是否检测到课无关）
 - **60 天自动停用**：仓库连续 60 天无 commit 后 GitHub 会自动停掉定时 workflow——长期使用需定期推送任意提交，或在 Actions 页发现停用后手动 Enable
 - GitHub Actions 的 cron **不保证准时**（可能延迟数分钟甚至跳过），高峰时段定时任务会被限流；重要课程建议用方式 A/C/D
@@ -240,6 +241,10 @@ python start.py
 
 **Q: 图片题答空了是怎么回事？**
 图片题的题干和选项内容往往在 slide 截图里。视觉模式下模型直接读图作答；若模型不支持视觉或图片下载失败，降级 OCR 提取文字。两者都拿不到有效信息时，选择题会随机作答、文字题放弃提交。
+
+**Q: 主观题（或填空题）总是答不上，日志显示「老师已提前结束该题作答（50026）」？**
+不是 token 或格式问题，是**提交时机**问题。雨课堂的题目一旦被老师点「结束作答」（`LESSON_PROBLEM_FINISHED`）就永久关闭，之后任何提交都返回 50026。主观题尤其容易被提前关闭（老师看几条回答就收），所以答案算得再准也没用——只要压到截止前才交，就必然撞上。
+现在的策略：答案一旦就绪就立刻提交（选择题约 `PREGEN_CHOICE_DELAY_SECONDS` 秒、文本题约 `TEXT_SUBMIT_DELAY_SECONDS` 秒后），**不再等截止**。若仍偶发 50026，把 `TEXT_SUBMIT_DELAY_SECONDS` 调小（例如 `3`）而不是调大。
 
 **Q: 日志在哪里看？**
 Zeabur/Docker 看容器日志；本地直接看终端输出。关键日志行：`发现上课`（进入课堂）、`发现 N 道新题`（题目缓存）、`单选题/多选题/主观题 …`（开始作答）、`答题成功`/`答题失败`（提交结果）。
