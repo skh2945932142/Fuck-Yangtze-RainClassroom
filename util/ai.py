@@ -8,6 +8,7 @@ from openai import OpenAI
 from config import ai_key
 from util.enncy import search
 from util.ocr import ocr_form_url_image
+from util.subjective import cap_answer
 
 ### 摘抄自一个学弟的第二课堂仓库AI部分
 ## https://github.com/tinyvan/SecondClass
@@ -23,6 +24,12 @@ vision_mode = os.getenv("VISION_MODE", "auto")
 # concise answer (a few sentences), this only guards against runaway
 # model output, so it is generous rather than a strict limit.
 SUBJECTIVE_MAX_CHARS = int(os.getenv("SUBJECTIVE_MAX_CHARS", "30"))
+# Hard ceiling. A sentence that has run past the soft target is left intact
+# (cutting mid-thought reads worse than being slightly long), but nothing may
+# exceed this many characters.
+SUBJECTIVE_HARD_MAX_CHARS = int(os.getenv("SUBJECTIVE_HARD_MAX_CHARS", "60"))
+if SUBJECTIVE_HARD_MAX_CHARS < SUBJECTIVE_MAX_CHARS:
+    SUBJECTIVE_HARD_MAX_CHARS = SUBJECTIVE_MAX_CHARS
 # Optional: disable the enncy question-bank lookup (empty key = skip).
 enncy_enabled = bool(os.getenv("ENNCY_KEY", ""))
 
@@ -42,7 +49,7 @@ options提供选项（如果选项为空，请从question中寻找，如果quest
 "answer":["A"]
 }
 如果question模糊不清，即使结合JSON的所有信息都无法辨别并给出答案。answer置为空list
-当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要冗长的解释、铺垫或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答控制在20字左右（不超过30字），一句话直接给出要点，能列点就列点（用顿号或分号分隔要点）
+当type为主观题或填空题时，answer为文本数组：answer的每个元素必须简洁、直接给出答案本身，不要冗长的解释、铺垫或markdown格式；填空题每个元素对应一个空（按顺序）；主观题通常只有一个元素；主观题回答控制在20~30字，句子必须写完整，不要写到一半停住；确实需要展开时可以超过30字，但最多不超过60字。能列点就列点（用顿号或分号分隔要点）
 """
 
 vision_system_prompt = """
@@ -52,7 +59,7 @@ vision_system_prompt = """
 "thinking":"你简洁的思考过程",
 "answer":["A"]
 }
-answer格式由type决定：单选题给一个字母（如["A"]）；多选题给多个字母（如["A","C"]）；投票题给一个字母；填空题给文本数组（每个元素对应一个空，按顺序）；主观题给文本数组（通常一个元素，20字左右，不超过30字，不要markdown）。
+answer格式由type决定：单选题给一个字母（如["A"]）；多选题给多个字母（如["A","C"]）；投票题给一个字母；填空题给文本数组（每个元素对应一个空，按顺序）；主观题给文本数组（通常一个元素，20~30字，句子写完整，最多不超过60字，不要markdown）。
 必须把答案放在answer数组里。看不清图片且文字信息不足以判断时，answer置为空list。
 """
 
@@ -229,22 +236,9 @@ def request_ai(type, problem, options, img_url):
     print(response)
     answer = _parse_answer_json(response)
 
-    # Safety net for subjective/fill-blank answers: the prompt already asks
-    # for a concise answer; this only kicks in on runaway output (200+ chars)
-    # so submissions stay a reasonable length.
+    # Safety net for subjective/fill-blank answers. The soft target lives in
+    # the prompt only; util.subjective.cap_answer enforces the hard ceiling
+    # and never cuts a sentence that is merely a bit long.
     if type in ("主观题", "填空题"):
-        capped = []
-        for item in answer:
-            if len(item) > SUBJECTIVE_MAX_CHARS:
-                # cut at the last sentence boundary within the limit, else hard cut
-                cut = item[:SUBJECTIVE_MAX_CHARS]
-                for sep in ("。", "；", ";", "！", "？"):
-                    idx = cut.rfind(sep)
-                    if idx >= int(SUBJECTIVE_MAX_CHARS * 0.5):
-                        cut = cut[:idx + 1]
-                        break
-                capped.append(cut)
-            else:
-                capped.append(item)
-        answer = capped
+        answer = cap_answer(answer, SUBJECTIVE_HARD_MAX_CHARS)
     return answer

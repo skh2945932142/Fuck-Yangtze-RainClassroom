@@ -81,7 +81,8 @@
 | `AI_BASE_URL` | `https://api.chatanywhere.tech/v1` | 任意 OpenAI 兼容端点 |
 | `AI_MODEL` | `gpt-4o-mini` | 模型名，建议用支持视觉的多模态模型 |
 | `VISION_MODE` | `auto` | 图片题作答方式：`auto`（自动探测视觉能力）/ `1`（强制视觉）/ `0`（强制 OCR） |
-| `SUBJECTIVE_MAX_CHARS` | `30` | 主观/填空题单条答案长度兜底上限（prompt 已要求主观题 20 字左右） |
+| `SUBJECTIVE_MAX_CHARS` | `30` | 主观题**软目标**字数：只写进 prompt，答案略超这个长度不会被硬截断 |
+| `SUBJECTIVE_HARD_MAX_CHARS` | `60` | 主观/填空题单条答案**硬上限**，超过才截断，且优先切在句末标点 |
 | `ENNCY_KEY` | 空 | 言溪题库 key（[获取](https://tk.enncy.cn/)）；不填则纯 AI 作答 |
 
 ### 课堂与通知（可选）
@@ -153,14 +154,14 @@ zeabur service restart --id <服务ID> --env-id <环境ID> -i=false
 2. 仓库 **Settings → Secrets and variables → Actions** 添加 Secrets：
    - `SESSION`（必填）、`AI_KEY`（必填）
    - 可选：`AI_BASE_URL`、`AI_MODEL`、`ENNCY_KEY`、`FILTERED_COURSES`、`EXCLUDE_COURSES`、`EMAIL_USER`、`EMAIL_PASS`、`TO_EMAIL`
-   - 可选 Variables（Variables 标签页）：`SUBMIT_BEFORE_DEADLINE_SECONDS`、`TEXT_SUBMIT_DELAY_SECONDS`、`PREGEN_CHOICE_DELAY_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS`
+   - 可选 Variables（Variables 标签页）：`SUBMIT_BEFORE_DEADLINE_SECONDS`、`TEXT_SUBMIT_DELAY_SECONDS`、`PREGEN_CHOICE_DELAY_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`SUBJECTIVE_HARD_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS`
 3. **Actions** 页启用 `Rain classroom auto answer (scheduled)` workflow
 
 行为说明：
 
 - cron 按学校上课时段（北京时间周一至五 7:00–20:00）**每 20 分钟**触发一次
 - `start.py` 是常驻进程，workflow 设了 **50 分钟超时**：单次 run 覆盖一个课时段的前 ~45 分钟，到点退出后由下一次 cron 接力（课堂中段的题目靠已建立的 WebSocket 监听，不依赖新 run）
-- `SUBMIT_BEFORE_DEADLINE_SECONDS`、`TEXT_SUBMIT_DELAY_SECONDS`、`PREGEN_CHOICE_DELAY_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS` 读取仓库 **Variables**（Settings → Secrets and variables → Actions → Variables 标签页），其余配置读取 **Secrets**——两者位置不同，配错会读到空值（不配则用代码默认值：压线 30s、主观题 30 字、视觉 auto、扫描间隔 300s）
+- `SUBMIT_BEFORE_DEADLINE_SECONDS`、`TEXT_SUBMIT_DELAY_SECONDS`、`PREGEN_CHOICE_DELAY_SECONDS`、`SUBJECTIVE_MAX_CHARS`、`SUBJECTIVE_HARD_MAX_CHARS`、`VISION_MODE`、`SCAN_INTERVAL_SECONDS` 读取仓库 **Variables**（Settings → Secrets and variables → Actions → Variables 标签页），其余配置读取 **Secrets**——两者位置不同，配错会读到空值（不配则用代码默认值：压线 30s、主观题软目标 30 字 / 硬上限 60 字、视觉 auto、扫描间隔 300s）
 - **分钟数**：公开仓库（本项目的任何 fork）使用标准 runner 完全免费且不限量；私有克隆受 2000 分钟/月免费额度限制，本模式上课日全天约 13 小时 runner 时间会迅速超限——私有部署请选方式 A/C/D。监听/答题不产生额外分钟消耗（每个 run 固定跑满 50 分钟超时，与是否检测到课无关）
 - **60 天自动停用**：仓库连续 60 天无 commit 后 GitHub 会自动停掉定时 workflow——长期使用需定期推送任意提交，或在 Actions 页发现停用后手动 Enable
 - GitHub Actions 的 cron **不保证准时**（可能延迟数分钟甚至跳过），高峰时段定时任务会被限流；重要课程建议用方式 A/C/D
