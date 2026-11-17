@@ -113,7 +113,7 @@ class NoticeDedupeTests(unittest.TestCase):
         time.sleep(0.15)
         self.assertEqual(self.recorder.count(), 2)
 
-    def test_exam_list_is_mailed_once_per_exam(self):
+    def test_exam_list_mails_one_digest_then_stays_silent(self):
         exams = [
             {"id": 2268377, "classroom_id": 26437603, "title": "第五章",
              "start_time": 1794821099, "end_time": 1799542800},
@@ -123,9 +123,30 @@ class NoticeDedupeTests(unittest.TestCase):
         # The API repeats the whole list on every scan round.
         for _ in range(3):
             notice.exam_notice(exams)
+        self.assertTrue(self.recorder.wait_for(1))
+        time.sleep(0.15)
+        self.assertEqual(self.recorder.count(), 1)
+        # Both exams are in the single digest, in Beijing time.
+        subject, body = self.recorder.calls[0]
+        self.assertIn("2 场考试", body)
+        self.assertIn("第五章", body)
+        self.assertIn("第四章", body)
+
+    def test_new_exam_after_the_digest_gets_its_own_mail(self):
+        first = [{"id": 1, "classroom_id": 9, "title": "第五章"}]
+        notice.exam_notice(first)
+        self.assertTrue(self.recorder.wait_for(1))
+        # Same exam again: nothing new to say.
+        notice.exam_notice(first)
+        time.sleep(0.15)
+        self.assertEqual(self.recorder.count(), 1)
+        # A second exam shows up later: exactly one more mail, for it alone.
+        notice.exam_notice(first + [{"id": 2, "classroom_id": 9, "title": "第六章"}])
         self.assertTrue(self.recorder.wait_for(2))
         time.sleep(0.15)
         self.assertEqual(self.recorder.count(), 2)
+        self.assertIn("1 场考试", self.recorder.calls[1][1])
+        self.assertIn("第六章", self.recorder.calls[1][1])
 
     def test_session_notice_mails_once_until_forgotten(self):
         for rounds in (3, 4, 5):

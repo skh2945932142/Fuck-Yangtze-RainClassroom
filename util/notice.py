@@ -106,7 +106,7 @@ def _refresh_guide():
 # 发送邮件提醒 标题、内容（收件人取环境变量 TO_EMAIL，发件箱为用户自己的邮箱）
 # event_key: 同一事件的去重键，None 表示不去重
 def email_notice(subject: str, content: str, event_key: str = None):
-    if not all([email_user, email_pass, to_email]):
+    if not _email_configured():
         print("邮件配置不完整（EMAIL_USER/EMAIL_PASS/TO_EMAIL），跳过通知", flush=True)
         return
 
@@ -167,39 +167,59 @@ def answer_failed_notice(course_name, question_type_name, problem_content, reaso
     email_notice(subject="雨课堂答题失败，请手动处理", content=body, event_key=event_key)
 
 
-# 考试提醒（同一场考试只提醒一次）
+# 考试提醒（每次新增考试汇总成一封，同一场考试只算一次）
 def exam_notice(exams):
-    """Mail once per exam listed under upcomingExam.
+    """Mail one digest for the exams that have not been announced yet.
 
     The API lists upcoming exams for days ahead and repeats the whole list on
-    every scan, so the key has to come from the exam identity, not the payload
-    order: classroom_id + exam id are stable across scans.
+    every scan, so identity has to come from the exam itself, not the payload
+    order: classroom_id + exam id are stable across scans. Several exams can
+    appear at once, hence a single digest instead of one mail per exam.
     """
+    if not _email_configured():
+        print("邮件配置不完整（EMAIL_USER/EMAIL_PASS/TO_EMAIL），跳过通知", flush=True)
+        return
+
+    fresh = []
     for exam in exams:
         if not isinstance(exam, dict):
             continue
-        exam_id = exam.get("id")
-        classroom_id = exam.get("classroom_id")
-        if exam_id is None and classroom_id is None:
-            # Unknown shape: fall back to title + start time so at least the
-            # same listing does not re-send every round.
-            event_key = f"exam:{exam.get('title')}:{exam.get('start_time')}"
-        else:
-            event_key = f"exam:{classroom_id}:{exam_id}"
+        if _claim(_exam_key(exam)):
+            fresh.append(exam)
+    if not fresh:
+        return
 
-        title = exam.get("title") or "(未命名考试)"
-        classroom = exam.get("classroom_name") or ""
-        start = exam.get("start_time")
-        end = exam.get("end_time")
-        body = f"{title} 已出现在雨课堂考列表中，请前往查看。\n\n"
-        if classroom:
-            body += f"课程：{classroom}\n"
-        if isinstance(start, (int, float)):
-            body += f"开始时间：{_beijing_time(start)}\n"
-        if isinstance(end, (int, float)):
-            body += f"结束时间：{_beijing_time(end)}\n"
-        body += "\n（同一场考试只提醒一次）"
-        email_notice(subject="雨课堂考试提醒", content=body, event_key=event_key)
+    if len(fresh) == 1:
+        head = "有 1 场考试出现在雨课堂考试列表中，请前往查看。\n\n"
+    else:
+        head = f"有 {len(fresh)} 场考试出现在雨课堂考试列表中，请前往查看。\n\n"
+    body = head
+    for exam in fresh:
+        body += f"【{exam.get('title') or '(未命名考试)'}】\n"
+        if exam.get("classroom_name"):
+            body += f"  课程：{exam['classroom_name']}\n"
+        if isinstance(exam.get("start_time"), (int, float)):
+            body += f"  开始时间：{_beijing_time(exam['start_time'])}\n"
+        if isinstance(exam.get("end_time"), (int, float)):
+            body += f"  结束时间：{_beijing_time(exam['end_time'])}\n"
+        body += "\n"
+    body += "（同一场考试只提醒一次）"
+    # Keys were claimed above, so no event_key here; a digest may cover several.
+    email_notice(subject="雨课堂考试提醒", content=body)
+
+
+def _exam_key(exam):
+    exam_id = exam.get("id")
+    classroom_id = exam.get("classroom_id")
+    if exam_id is None and classroom_id is None:
+        # Unknown shape: fall back to title + start time so at least the same
+        # listing does not re-send on every round.
+        return f"exam:{exam.get('title')}:{exam.get('start_time')}"
+    return f"exam:{classroom_id}:{exam_id}"
+
+
+def _email_configured():
+    return bool(email_user and email_pass and to_email)
 
 
 def _beijing_time(timestamp):

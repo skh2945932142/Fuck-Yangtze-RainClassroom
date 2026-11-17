@@ -199,7 +199,7 @@ docker logs -f rain-classroom
 
 > 邮件提醒通过你自己的邮箱 SMTP 发送（发件人 = 收件人 = 你）。QQ 邮箱需先在 **设置 → 账户 → POP3/SMTP 服务** 中开启并生成**授权码**（不是 QQ 密码）。SESSION 连续 3 轮失效、考试出现、或某道题作答失败时你会收到带处理指引的邮件（Docker 部署的指引是"更新 .env 后 `docker restart`"）。
 >
-> **同一事件只提醒一次**：去重键分别是 `session-expired`（恢复后自动重置）、`exam:<classroom_id>:<exam_id>`（每场考试一封）、`answer-failed:<题目 id>`（每题一封），账本落在 `NOTICE_STATE_FILE`（默认 `notified.json`）。容器重建会丢这个文件，想跨重建保留就给它挂个卷。
+> **同一事件只提醒一次**：去重键分别是 `session-expired`（恢复后自动重置）、`exam:<classroom_id>:<exam_id>`（每场考试算一次；多场同时出现汇总成一封）、`answer-failed:<题目 id>`（每题一封），账本落在 `NOTICE_STATE_FILE`（默认 `notified.json`）。容器重建会丢这个文件，想跨重建保留就给它挂个卷。
 
 ### 方式 D：本地运行（最简单）
 
