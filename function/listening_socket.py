@@ -231,7 +231,8 @@ def on_message_connect(ppt_jwt, lesson_id, identity_id, socket_jwt, sleep_second
                         problem.get("course_name") or course_name,
                         question_type[problem.get("type")],
                         problem.get("content"),
-                        f"自动作答连续 {MAX_ANSWER_ATTEMPTS} 次被拒（详见服务器日志），请手动处理")
+                        f"自动作答连续 {MAX_ANSWER_ATTEMPTS} 次被拒（详见服务器日志），请手动处理",
+                        problem_id=q_id)
             finally:
                 with problem_state_lock:
                     processing_problem_ids.discard(q_id)
@@ -719,7 +720,8 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
         except Exception as error:
             print(f"AI 调用异常: {type(error).__name__}: {error!r}", flush=True)
             answer_failed_notice(course_name, question_type[problem_type],
-                                 problem_content, f"AI 调用异常（{type(error).__name__}）")
+                                 problem_content, f"AI 调用异常（{type(error).__name__}）",
+                                 problem_id=problem_id)
             return False
         # Answer generated live: the deadline-margin hold would apply from
         # here on, which is the same 50026 race as above (worse — the model
@@ -747,7 +749,8 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
         else:
             print("答案为空且非选择题，放弃本次作答", flush=True)
             answer_failed_notice(course_name, question_type[problem_type],
-                                 problem_content, "AI 无法判断答案（非选择题，未提交）")
+                                 problem_content, "AI 无法判断答案（非选择题，未提交）",
+                                 problem_id=problem_id)
             return False
 
     # Hold submission until (deadline - margin). The answer is already
@@ -814,7 +817,7 @@ def answer(problem_id, problem_type, jwt, problem_content, options, img_url, cou
         if course_name:
             answer_failed_notice(
                 course_name, question_type[problem_type], problem_content,
-                "老师提前结束了该题作答（未及提交）")
+                "老师提前结束了该题作答（未及提交）", problem_id=problem_id)
         return "terminal"
 
     # Token-expiry style rejections: the lesson token from check-in time has

@@ -25,7 +25,7 @@
 | 👁️ 多模态视觉答题 | 图片题（电路图/图表等）把 slide 截图直接发给视觉模型读图作答；视觉不可用自动降级 PaddleOCR 文字识别 |
 | 📝 按题型提交 | 单选/多选/投票/填空/主观题各自正确的 payload 格式（修复了上游填空/主观题提交必失败的问题） |
 | 🎲 兜底策略 | AI 答不出时：选择题随机作答，文字题放弃提交（不留空白记录） |
-| 📧 失效邮件提醒 | SESSION 连续 3 轮失效（约 15 分钟）发邮件提醒，一次失效只发一封 |
+| 📧 邮件提醒 | SESSION 连续 3 轮失效（约 15 分钟）、考试出现、答题失败各发一封；**同一事件只发一次**，不重复轰炸：失效/考试按事件去重，答题失败按题目 id 去重 |
 | 🔁 稳定性 | 多课并发每课单监听器（去重）、WebSocket 断线自动重连、下课自动退出 |
 
 ## 🔧 工作原理
@@ -102,6 +102,8 @@
 | `TO_EMAIL` | 空 | 收件邮箱（可与发件相同） |
 | `EMAIL_HOST` | `smtp.qq.com` | SMTP 服务器 |
 | `EMAIL_PORT` | `465` | SMTP 端口（SSL） |
+| `NOTICE_STATE_FILE` | `notified.json` | 事件去重账本路径（记录哪些事件已提醒过）；想跨容器重建保留，把它挂到持久卷上 |
+| `NOTICE_DEDUPE_TTL_SECONDS` | `604800` | 去重记录的保留时长（默认 7 天），过期后同一事件可再次提醒 |
 
 ### 自动重登（可选，作用有限）
 
@@ -195,7 +197,9 @@ docker run -d --name rain-classroom --restart unless-stopped --env-file .env rai
 docker logs -f rain-classroom
 ```
 
-> 邮件提醒通过你自己的邮箱 SMTP 发送（发件人 = 收件人 = 你）。QQ 邮箱需先在 **设置 → 账户 → POP3/SMTP 服务** 中开启并生成**授权码**（不是 QQ 密码）。SESSION 连续 3 轮失效或答题失败时你会收到带处理指引的邮件（Docker 部署的指引是"更新 .env 后 `docker restart`"）。
+> 邮件提醒通过你自己的邮箱 SMTP 发送（发件人 = 收件人 = 你）。QQ 邮箱需先在 **设置 → 账户 → POP3/SMTP 服务** 中开启并生成**授权码**（不是 QQ 密码）。SESSION 连续 3 轮失效、考试出现、或某道题作答失败时你会收到带处理指引的邮件（Docker 部署的指引是"更新 .env 后 `docker restart`"）。
+>
+> **同一事件只提醒一次**：去重键分别是 `session-expired`（恢复后自动重置）、`exam:<classroom_id>:<exam_id>`（每场考试一封）、`answer-failed:<题目 id>`（每题一封），账本落在 `NOTICE_STATE_FILE`（默认 `notified.json`）。容器重建会丢这个文件，想跨重建保留就给它挂个卷。
 
 ### 方式 D：本地运行（最简单）
 

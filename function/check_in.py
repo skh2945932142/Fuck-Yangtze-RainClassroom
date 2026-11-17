@@ -7,20 +7,22 @@ from config import host, api, headers, log_file_name, check_in_sources, \
     ykt_name, ykt_password, ykt_login_type, set_session_id, \
     exclude_courses
 from util.file import write_log, read_log
-from util.notice import email_notice, session_expired_notice
+from util.notice import (exam_notice, forget_notice, session_expired_notice,
+                         SESSION_EXPIRED_KEY)
 from util.timestamp import get_now
 
 
 # 连续失效计数：雨课堂服务端偶发认证抖动（瞬时 UNAUTHENTICATED 后自愈），
-# 连续 N 轮失效才认定真过期并发邮件，避免抖动误报
+# 连续 N 轮失效才认定真过期并发邮件，避免抖动误报。
+# 去重靠 util.notice 的事件账本（跨进程重启也有效），所以这里不再需要
+# 进程内的 _notice_sent 标志。
 _session_failure_count = 0
 SESSION_FAILURE_NOTICE_THRESHOLD = 3
-_notice_sent = False
 
 
 # 获取正在进行的
 def get_listening():
-    global _session_failure_count, _notice_sent
+    global _session_failure_count
     response = requests.get(host + api["get_listening"], headers=headers)
     if response.status_code == 200:
         response_data = response.json()
@@ -33,14 +35,15 @@ def get_listening():
             # 重登成功即视为恢复；重登没配置/失败时连续 N 轮后邮件提醒一次
             if relogin_ok:
                 _session_failure_count = 0
-                _notice_sent = False
-            elif (_session_failure_count >= SESSION_FAILURE_NOTICE_THRESHOLD
-                  and not _notice_sent):
+                # 恢复正常：允许下一次真正失效时再发提醒
+                forget_notice(SESSION_EXPIRED_KEY)
+            elif _session_failure_count >= SESSION_FAILURE_NOTICE_THRESHOLD:
+                # 同一轮失效只会发出一封（账本去重）
                 session_expired_notice(_session_failure_count)
-                _notice_sent = True
             return None
         _session_failure_count = 0
-        _notice_sent = False
+        # 本轮请求成功 = 已恢复，清掉失效事件，避免下次失效被当成重复
+        forget_notice(SESSION_EXPIRED_KEY)
         return response_data["data"]
     else:
         return None
@@ -146,8 +149,9 @@ def check_exam():
         else:
             print("发现考试")
             print(exams)
-            # 发邮件提醒
-            email_notice(subject="雨课堂考试提醒", content="请打开雨课堂")
+            # 发邮件提醒：同一场考试只发一封（按 classroom_id + exam id 去重），
+            # 否则 upcomingExam 会在每轮扫描里反复命中，变成邮件轰炸
+            exam_notice(exams)
             return
 
 
